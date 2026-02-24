@@ -1,131 +1,194 @@
 import streamlit as st
 from huggingface_hub import InferenceClient
 import os
+import re
 
 # --------------------------------------------------
 # PAGE CONFIG
 # --------------------------------------------------
 st.set_page_config(
-    page_title="Requirements Intelligence Platform",
+    page_title="AI-PO-Assistant",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
 # --------------------------------------------------
-# HUGGINGFACE CONFIG
-# --------------------------------------------------
-HF_TOKEN = os.getenv("HF_TOKEN")  # Set in Streamlit secrets or HF Spaces
-MODEL_NAME = "meta-llama/Meta-Llama-3-8B-Instruct"
-
-client = InferenceClient(
-    model=MODEL_NAME,
-    token=HF_TOKEN
-)
-
-# --------------------------------------------------
-# STYLING
+# WELLS FARGO ENTERPRISE THEME
 # --------------------------------------------------
 st.markdown("""
 <style>
+
+/* Remove default spacing */
 .block-container {
     padding-top: 0rem !important;
     padding-left: 2rem;
     padding-right: 2rem;
 }
 
-.main-header {
-    background: linear-gradient(90deg, #b5121b, #d71e28);
-    padding: 25px 10px;
-    text-align: center;
-    color: #ffd700;
-    font-size: 26px;
+/* Full Width Red Header */
+.page-header {
+    width: 100vw;
+    margin-left: calc(-50vw + 50%);
+    background: linear-gradient(90deg, #B5121B, #E41B17);
+    color: #FFD700;
+    padding: 28px 40px;
+    font-size: 28px;
     font-weight: 700;
-    width: 100vw;
-    margin-left: calc(-50vw + 50%);
+    letter-spacing: 0.5px;
+    text-align: left;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.25);
 }
 
-.sub-header {
-    text-align: center;
+/* Dark subtitle strip */
+.page-subtitle {
+    width: 100vw;
+    margin-left: calc(-50vw + 50%);
+    background-color: #111827;
+    color: #F3F4F6;
+    padding: 10px 40px;
     font-size: 14px;
-    color: #f0f0f0;
-    background-color: #0e1a2b;
-    padding: 8px;
-    width: 100vw;
-    margin-left: calc(-50vw + 50%);
+    font-weight: 500;
+    margin-bottom: 30px;
 }
 
-.section-title {
-    font-size: 18px;
+/* Buttons */
+div.stButton > button:first-child {
+    background-color: #E41B17;
+    color: #FFD700;
+    border-radius: 10px;
+    padding: 10px 28px;
     font-weight: 600;
-    margin-top: 25px;
+    border: none;
 }
 
-body, p, div {
-    font-size: 14px !important;
+div.stButton > button:first-child:hover {
+    background-color: #B5121B;
 }
+
+/* Textarea */
+textarea {
+    border-radius: 10px !important;
+    padding: 12px !important;
+    font-size: 15px !important;
+    border: 2px solid #E41B17 !important;
+}
+
+/* Epic Card */
+.epic {
+    background: #FFF7F7;
+    padding: 20px;
+    border-radius: 12px;
+    margin-bottom: 25px;
+    border-left: 6px solid #E41B17;
+}
+
+/* Story Card */
+.story-card {
+    background: #FFFFFF;
+    border-radius: 12px;
+    padding: 18px;
+    margin-bottom: 18px;
+    border-left: 6px solid #E41B17;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.05);
+}
+
+.stDownloadButton>button {
+    background-color: #E41B17;
+    color: #FFD700;
+    border-radius: 10px;
+    font-weight: 600;
+}
+
 </style>
 """, unsafe_allow_html=True)
 
 # --------------------------------------------------
 # HEADER
 # --------------------------------------------------
-st.markdown('<div class="main-header">Requirements Intelligence Platform</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Enterprise AI Requirements → Jira Story Engine</div>', unsafe_allow_html=True)
+st.markdown('<div class="page-header">AI-PO-Assistant</div>', unsafe_allow_html=True)
+st.markdown('<div class="page-subtitle">Convert Enterprise Business Requirements into Jira-ready Markdown</div>', unsafe_allow_html=True)
 
 # --------------------------------------------------
-# INPUT
+# HUGGINGFACE CONFIG
 # --------------------------------------------------
-st.markdown('<div class="section-title">Enter Business Requirement</div>', unsafe_allow_html=True)
+HF_TOKEN = os.environ.get("HF_TOKEN")
 
-business_input = st.text_area(
-    "",
-    height=200,
-    placeholder="Example: Build a secure loan transfer system with approval workflow and dashboard tracking..."
-)
+if not HF_TOKEN:
+    st.error("HF_TOKEN not found. Add it in Settings → Secrets.")
+    st.stop()
+
+client = InferenceClient(token=HF_TOKEN)
+
+MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.2"  # Stable model
 
 # --------------------------------------------------
-# PROMPT TEMPLATE
+# INPUT SECTION
 # --------------------------------------------------
-def build_prompt(requirement):
-    return f"""
-You are a senior Agile Business Analyst.
+st.markdown("### Enter Business Requirement")
 
-Convert the following enterprise business requirement into Jira-ready Markdown format.
+requirement_text = st.text_area("📄 Type Business Requirement", height=200)
+uploaded_file = st.file_uploader("📂 Or upload a .txt file", type=["txt"])
 
-Format strictly as:
-- Epic
-- Multiple User Stories
-- Each story must include:
-    - As a / I want / So that
-    - Acceptance Criteria (bullet list)
-    - Subtasks (bullet list)
+requirement_file = ""
+if uploaded_file is not None:
+    requirement_file = uploaded_file.read().decode("utf-8", errors="ignore")
+    st.info("File uploaded successfully.")
+
+requirement = requirement_file if uploaded_file else requirement_text
+
+# --------------------------------------------------
+# GENERATE
+# --------------------------------------------------
+if st.button("🚀 Generate Breakdown"):
+
+    if not requirement.strip():
+        st.warning("Please enter or upload a requirement.")
+    else:
+        with st.spinner("Generating structured Jira breakdown..."):
+
+            prompt = f"""
+You are a Senior Enterprise Business Analyst.
+
+Convert the following business requirement into structured Markdown.
+
+Format:
+# Epic
+- Title:
+- Description:
+
+# User Stories
+
+## Story 1
+- Title:
+- As a:
+- I want:
+- So that:
+- Acceptance Criteria:
+- Subtasks:
 
 Business Requirement:
 {requirement}
 """
 
-# --------------------------------------------------
-# GENERATE BUTTON
-# --------------------------------------------------
-if st.button("Generate AI Jira Markdown"):
+            try:
+                output = client.text_generation(
+                    prompt,
+                    model=MODEL_NAME,
+                    max_new_tokens=1200,
+                    temperature=0.3
+                )
+            except Exception as e:
+                st.error(f"HuggingFace API Error: {e}")
+                st.stop()
 
-    if not business_input.strip():
-        st.warning("Please enter business requirement.")
-    else:
-        with st.spinner("Generating AI-powered Jira stories..."):
+            # Display Output
+            st.markdown("## 📋 Jira Structured Output")
+            st.markdown(output)
 
-            response = client.text_generation(
-                build_prompt(business_input),
-                max_new_tokens=1200,
-                temperature=0.4
+            # Download
+            st.download_button(
+                "💾 Download Markdown",
+                output,
+                file_name="jira_breakdown.md",
+                mime="text/markdown"
             )
-
-        st.markdown('<div class="section-title">Jira-Ready Markdown Output</div>', unsafe_allow_html=True)
-        st.code(response, language="markdown")
-
-        st.download_button(
-            "Download Markdown",
-            response,
-            file_name="jira_requirements.md",
-            mime="text/markdown"
-        )
