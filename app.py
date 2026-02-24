@@ -3,24 +3,97 @@ from huggingface_hub import InferenceClient
 import os
 import re
 
-# ------------------ Custom CSS ------------------
+# ------------------ Custom CSS (Full Wells Fargo Branding) ------------------
 st.markdown(
     """
     <style>
-    .stApp { background-color: #ffffff; font-family: 'Poppins', sans-serif; }
-    h1 { color: #2575fc; font-size: 2.5rem; text-align: center; margin-bottom: 20px; }
-    div.stButton > button:first-child { background-color: #2575fc; color: white; border-radius: 12px; padding: 10px 25px; font-weight: 600; transition: all 0.3s ease; }
-    div.stButton > button:first-child:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(0,0,0,0.2); }
-    textarea { border-radius: 12px !important; padding: 10px !important; font-size: 16px; }
-    .epic { background: #ffffffcc; padding: 15px; border-radius: 15px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); margin-bottom: 20px; }
-    .story-card { background: #ffffff; border-radius: 15px; padding: 15px; margin-bottom: 15px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+    /* App background & font */
+    .stApp {
+        background-color: #ffffff; 
+        font-family: 'Poppins', sans-serif;
+    }
+
+    /* Header section */
+    .app-header {
+        background-color: #E41B17; /* Wells Fargo Red */
+        color: #FFD700;           /* Wells Fargo Yellow */
+        text-align: center;
+        padding: 20px;
+        border-radius: 10px;
+        font-size: 2.5rem;
+        font-weight: 700;
+        margin-bottom: 30px;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+    }
+
+    /* Section titles */
+    h2, h3, h4 {
+        color: #E41B17;
+        font-weight: 700;
+    }
+
+    /* Buttons */
+    div.stButton > button:first-child {
+        background-color: #E41B17;
+        color: #FFD700;
+        border-radius: 12px;
+        padding: 10px 25px;
+        font-weight: 600;
+        transition: all 0.3s ease;
+    }
+    div.stButton > button:first-child:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 8px 20px rgba(0,0,0,0.2);
+    }
+
+    /* Textarea input */
+    textarea {
+        border-radius: 12px !important;
+        padding: 10px !important;
+        font-size: 16px;
+        border: 1px solid #E41B17 !important;
+    }
+
+    /* Epic cards */
+    .epic {
+        background: #FFF5F5; 
+        padding: 15px;
+        border-radius: 15px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+        margin-bottom: 20px;
+        border-left: 5px solid #E41B17;
+    }
+
+    /* Story cards */
+    .story-card {
+        background: #ffffff;
+        border-radius: 15px;
+        padding: 15px;
+        margin-bottom: 15px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+        border-left: 5px solid #E41B17;
+    }
+
+    /* Download button */
+    .stDownloadButton>button {
+        background-color: #E41B17;
+        color: #FFD700;
+        border-radius: 12px;
+        padding: 8px 20px;
+        font-weight: 600;
+    }
+    .stDownloadButton>button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 6px 15px rgba(0,0,0,0.2);
+    }
     </style>
     """,
     unsafe_allow_html=True
 )
 
-# ------------------ App Title ------------------
-st.markdown("## Convert Enterprise Business Requirements into Jira-ready Markdown")
+# ------------------ Header ------------------
+st.markdown('<div class="app-header">AI‑PO‑Assistantce</div>', unsafe_allow_html=True)
+st.markdown("### Convert Enterprise Business Requirements into Jira-ready Markdown")
 
 # ------------------ Hugging Face Setup ------------------
 HF_TOKEN = os.getenv("HF_TOKEN")
@@ -32,14 +105,9 @@ client = InferenceClient(token=HF_TOKEN)
 
 # ------------------ User Input ------------------
 st.markdown("### Enter Business Requirement")
-
-# Text area input
 requirement_text = st.text_area("📄 Type Business Requirement", height=200)
-
-# File uploader for .txt files
 uploaded_file = st.file_uploader("📂 Or upload a .txt file with the requirement", type=["txt"])
 
-# Read content from uploaded file if provided
 requirement_file = ""
 if uploaded_file is not None:
     try:
@@ -49,7 +117,6 @@ if uploaded_file is not None:
     except Exception as e:
         st.error(f"Error reading file: {e}")
 
-# Use uploaded file if present, else use text area
 requirement = requirement_file if uploaded_file else requirement_text
 
 # ------------------ Generate Breakdown ------------------
@@ -80,7 +147,6 @@ Business Requirement:
 {requirement}
 """
 
-            # ------------------ API Call ------------------
             try:
                 response = client.chat.completions.create(
                     model="Qwen/Qwen2.5-7B-Instruct",
@@ -128,7 +194,7 @@ Business Requirement:
             else:
                 st.markdown(output)
 
-            # ------------------ Optional: Download Button ------------------
+            # ------------------ Download Button ------------------
             st.download_button(
                 label="💾 Download Jira Markdown",
                 data=output,
