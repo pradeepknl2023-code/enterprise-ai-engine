@@ -66,34 +66,36 @@ if "history" not in st.session_state:
     st.session_state.history = []
 
 # -----------------------------------
-# SAFE EXEC FUNCTION
+# SAFE EXECUTION FUNCTION
 # -----------------------------------
 def safe_exec(df, code):
     """
-    Safely execute only Python code from AI-generated content.
+    Execute AI-generated Python code safely:
+    - Ignore English text/explanations
+    - Only execute assignments, pandas ops, and imports
     """
-    # Extract Python code blocks
-    python_blocks = re.findall(r"```python(.*?)```", code, flags=re.DOTALL)
-    if not python_blocks:
-        code = re.sub(r"```.*?```", "", code, flags=re.DOTALL)
-        python_blocks = [code]
-    
-    executed = df.copy()
-    for block in python_blocks:
-        block_lines = block.splitlines()
-        # Keep lines that look like Python code
-        python_lines = [line for line in block_lines if re.search(r"^\s*(df|pd|import|from|\w+.*=)", line)]
-        cleaned_code = "\n".join(python_lines)
-        if not cleaned_code.strip():
+    # Remove code block markers
+    code = re.sub(r"```.*?```", "", code, flags=re.DOTALL)
+
+    python_lines = []
+    for line in code.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
             continue
-        local_env = {"df": executed.copy(), "pd": pd}
-        try:
-            exec(cleaned_code, {}, local_env)
-            executed = local_env["df"]
-        except Exception as e:
-            st.error(f"Failed to execute AI code block: {e}")
-            return df
-    return executed
+        # Only allow lines that reference df, pd, imports, or assignments
+        if re.match(r"^(df|pd|import|from|\w+.*=)", line):
+            python_lines.append(line)
+    cleaned_code = "\n".join(python_lines)
+    if not cleaned_code:
+        return df  # nothing to execute
+
+    local_env = {"df": df.copy(), "pd": pd}
+    try:
+        exec(cleaned_code, {}, local_env)
+    except Exception as e:
+        st.warning(f"Failed executing AI code block: {e}")
+        return df
+    return local_env["df"]
 
 # -----------------------------------
 # TABS
@@ -119,7 +121,19 @@ with tab1:
         df = pd.read_csv(uploaded_file)
         original_rows = len(df)
 
-        # System prompt for AI
+        # ---------------------------
+        # Simple numeric/string filter first
+        # ---------------------------
+        # Look for pattern: "salary equal to 75000" etc.
+        match = re.search(r"(?i)salary.*(equal to|=)\s*(\d+)", etl_prompt)
+        if match:
+            val = int(match.group(2))
+            if 'Salary' in df.columns:
+                df = df[df['Salary'] == val]
+
+        # ---------------------------
+        # AI-generated transformations
+        # ---------------------------
         system_prompt = f"""
 You are a Senior Enterprise Data Engineer.
 
@@ -148,23 +162,24 @@ STRICT RULES:
                 messages=messages,
                 temperature=0.1
             )
-            code = response.choices[0].message.content
-            return code
+            return response.choices[0].message.content
 
         try:
-            code = generate_code()
-            transformed_df = safe_exec(df, code)
+            ai_code = generate_code()
+            transformed_df = safe_exec(df, ai_code)
         except Exception as e:
             st.error(f"ETL failed: {e}")
             transformed_df = df.copy()
 
         st.subheader("Generated Code")
-        st.code(code)
+        st.code(ai_code)
 
         st.subheader("Transformed Output")
         st.dataframe(transformed_df, use_container_width=True)
 
+        # ---------------------------
         # Save history
+        # ---------------------------
         st.session_state.history.append({
             "Time": datetime.datetime.now(),
             "Prompt": etl_prompt,
@@ -172,12 +187,17 @@ STRICT RULES:
             "Rows After": len(transformed_df)
         })
 
+        # ---------------------------
         # Export
+        # ---------------------------
         st.markdown('<div class="section-title">Export Results</div>', unsafe_allow_html=True)
         col1, col2 = st.columns(2)
+
+        # CSV
         csv_data = transformed_df.to_csv(index=False).encode("utf-8")
         col1.download_button("Download CSV", csv_data, "etl_output.csv", "text/csv")
 
+        # Excel
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             transformed_df.to_excel(writer, sheet_name="Transformed_Data", index=False)
