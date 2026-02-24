@@ -13,14 +13,13 @@ st.set_page_config(
 )
 
 # ==========================================================
-# FULL WIDTH HEADER STYLE (Professional)
+# HEADER STYLE
 # ==========================================================
 st.markdown("""
 <style>
 .main-header {
     background-color: #b31b1b;
     padding: 18px;
-    border-radius: 0px;
     text-align: center;
 }
 .main-header h1 {
@@ -34,8 +33,13 @@ st.markdown("""
     color: grey;
     margin-top: 8px;
 }
-.stDownloadButton button {
+.stButton button {
     background-color: #b31b1b;
+    color: white;
+    font-weight: bold;
+}
+.stDownloadButton button {
+    background-color: #006400;
     color: white;
 }
 </style>
@@ -91,16 +95,6 @@ def apply_etl_rules(df, description):
             df = df[df[column].astype(str).str.lower() != value.lower()]
             return df, f"Removed rows where {column} equals '{value}'"
 
-    # REMOVE CONTAINS
-    if "remove" in desc and "contains" in desc:
-        column = find_column(df, desc)
-        match = re.search(r"contains\s+([\w@.]+)", desc)
-
-        if column and match:
-            value = match.group(1)
-            df = df[~df[column].astype(str).str.lower().str.contains(value.lower())]
-            return df, f"Removed rows where {column} contains '{value}'"
-
     # GREATER THAN
     if "greater than" in desc:
         column = find_column(df, desc)
@@ -110,16 +104,6 @@ def apply_etl_rules(df, description):
             value = float(match.group(1))
             df = df[pd.to_numeric(df[column], errors='coerce') > value]
             return df, f"Filtered rows where {column} > {value}"
-
-    # LESS THAN
-    if "less than" in desc:
-        column = find_column(df, desc)
-        match = re.search(r"less than\s+(\d+)", desc)
-
-        if column and match:
-            value = float(match.group(1))
-            df = df[pd.to_numeric(df[column], errors='coerce') < value]
-            return df, f"Filtered rows where {column} < {value}"
 
     return df, "No matching rule found. Try clearer instruction."
 
@@ -131,48 +115,49 @@ def convert_df_to_csv(df):
 
 
 # ==========================================================
-# UI SECTION
+# UI
 # ==========================================================
 
 st.subheader("Upload Dataset")
-
 uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
 
 st.subheader("Business Transformation Rule")
-
 business_description = st.text_area(
     "Describe transformation in plain English",
     placeholder="Example: remove records where Email starts with pradeep"
 )
 
-st.divider()
-
 # ==========================================================
-# PROCESSING
+# SUBMIT BUTTON
 # ==========================================================
 
-if uploaded_file and business_description:
+if st.button("Apply Transformation"):
 
-    df = pd.read_csv(uploaded_file)
+    if not uploaded_file:
+        st.error("Please upload a CSV file.")
+    elif not business_description:
+        st.error("Please enter a transformation rule.")
+    else:
+        df = pd.read_csv(uploaded_file)
 
-    st.subheader("Original Data")
-    st.dataframe(df.head())
+        st.subheader("Original Data")
+        st.dataframe(df.head())
 
-    updated_df, message = apply_etl_rules(df, business_description)
+        updated_df, message = apply_etl_rules(df, business_description)
 
-    st.success(message)
+        st.success(message)
 
-    st.subheader("Processed Data")
-    st.dataframe(updated_df)
+        st.subheader("Processed Data")
+        st.dataframe(updated_df)
 
-    csv_data = convert_df_to_csv(updated_df)
+        csv_data = convert_df_to_csv(updated_df)
 
-    st.download_button(
-        label="Download Processed CSV",
-        data=csv_data,
-        file_name="processed_output.csv",
-        mime="text/csv"
-    )
+        st.download_button(
+            label="Download Processed CSV",
+            data=csv_data,
+            file_name="processed_output.csv",
+            mime="text/csv"
+        )
 
 else:
-    st.info("Upload CSV and enter transformation rule to begin.")
+    st.info("Upload CSV, enter rule, and click Apply Transformation.")
