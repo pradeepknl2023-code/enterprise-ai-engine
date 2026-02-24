@@ -2,18 +2,18 @@ import streamlit as st
 import pandas as pd
 import os
 import re
+import datetime
 from groq import Groq
+from difflib import get_close_matches
+from io import BytesIO
 
 # -----------------------------------
 # PAGE CONFIG
 # -----------------------------------
-st.set_page_config(
-    page_title="Enterprise AI ETL Engine",
-    layout="wide"
-)
+st.set_page_config(page_title="Enterprise AI Platform", layout="wide")
 
 # -----------------------------------
-# WELLS FARGO ENTERPRISE THEME
+# WELLS ENTERPRISE THEME
 # -----------------------------------
 st.markdown("""
 <style>
@@ -25,22 +25,19 @@ st.markdown("""
 }
 .main-header h1 {
     color: #FFC72C;
-    font-size: 34px;
     margin: 0;
-    font-weight: bold;
+    font-size: 32px;
 }
 .section-title {
     color: #B31B1B;
-    font-size: 22px;
     font-weight: 600;
+    font-size: 20px;
     margin-top: 20px;
 }
 .stButton>button {
     background-color: #B31B1B;
     color: white;
     font-weight: bold;
-    border-radius: 6px;
-    padding: 10px 24px;
 }
 .stButton>button:hover {
     background-color: #8E1414;
@@ -51,7 +48,7 @@ st.markdown("""
 
 st.markdown("""
 <div class="main-header">
-<h1>Enterprise AI ETL Transformation Engine</h1>
+<h1>Enterprise AI Transformation & Delivery Platform</h1>
 </div>
 """, unsafe_allow_html=True)
 
@@ -59,111 +56,165 @@ st.markdown("""
 # GROQ CONFIG
 # -----------------------------------
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
 if not GROQ_API_KEY:
-    st.error("GROQ_API_KEY not found in environment variables.")
+    st.error("Please set GROQ_API_KEY in Streamlit Secrets.")
     st.stop()
 
 client = Groq(api_key=GROQ_API_KEY)
 
 # -----------------------------------
-# FILE UPLOAD
+# BUSINESS DESCRIPTION FIRST
 # -----------------------------------
-st.markdown('<div class="section-title">Upload Dataset</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-title">Business Description</div>', unsafe_allow_html=True)
 
-uploaded_file = st.file_uploader("Upload CSV file", type=["csv"])
-
-df = None
-if uploaded_file:
-    df = pd.read_csv(uploaded_file)
-    st.dataframe(df, use_container_width=True)
-
-# -----------------------------------
-# PROMPT INPUT
-# -----------------------------------
-st.markdown('<div class="section-title">Describe Transformation</div>', unsafe_allow_html=True)
-
-prompt = st.text_area(
-    "Example: Remove records where Last_Name = kumar and create full_name column",
-    height=120
+business_prompt = st.text_area(
+    "Describe business requirement or data transformation",
+    height=150
 )
 
-# -----------------------------------
-# RUN BUTTON (ALWAYS VISIBLE)
-# -----------------------------------
-run_clicked = st.button("Run Enterprise ETL")
+col1, col2 = st.columns(2)
+etl_clicked = col1.button("Run AI ETL")
+jira_clicked = col2.button("Generate Jira Breakdown")
 
-# -----------------------------------
-# EXECUTION
-# -----------------------------------
-if run_clicked:
+# ===================================
+# ========== AI ETL ENGINE ==========
+# ===================================
 
-    if df is None:
-        st.warning("Please upload a CSV file before running ETL.")
+if etl_clicked:
+
+    if not business_prompt.strip():
+        st.warning("Please enter business description.")
         st.stop()
 
-    if not prompt.strip():
-        st.warning("Please enter a transformation description.")
+    st.markdown('<div class="section-title">Upload Dataset</div>', unsafe_allow_html=True)
+    uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
+
+    if not uploaded_file:
+        st.info("Please upload file to proceed.")
         st.stop()
 
-    with st.spinner("Generating enterprise-grade Pandas transformation..."):
+    df = pd.read_csv(uploaded_file)
+    original_count = len(df)
 
-        system_prompt = f"""
-You are a Senior Enterprise Data Engineer working in a regulated banking environment.
+    st.dataframe(df, use_container_width=True)
+
+    system_prompt = f"""
+You are a Senior Enterprise Data Engineer.
 
 STRICT RULES:
 - DataFrame name is df
-- Always handle null values using fillna("")
-- Always strip whitespace using .str.strip()
-- Always perform case-insensitive comparison using .str.lower()
+- Always handle nulls using fillna("")
+- Always strip spaces using .str.strip()
+- Always compare strings case-insensitive using .str.lower()
 - Never use inplace=True
 - Never use loops for filtering
-- Always use vectorized pandas operations
-- Never explain anything
+- Use vectorized pandas operations
 - Return ONLY executable Python code
 - Columns available: {df.columns.tolist()}
 
-For filtering strings use:
+Safe filtering pattern:
 df = df[~df["column"].fillna("").str.strip().str.lower().eq("value")]
 """
 
-        try:
-            response = client.chat.completions.create(
-                model="llama-3.1-8b-instant",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.1,
-            )
+    def generate_code(error_message=None):
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": business_prompt}
+        ]
+        if error_message:
+            messages.append({
+                "role": "user",
+                "content": f"Previous code failed with error: {error_message}. Fix it."
+            })
 
-            generated_code = response.choices[0].message.content.strip()
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=messages,
+            temperature=0.1
+        )
+        code = response.choices[0].message.content
+        code = re.sub(r"```python", "", code)
+        code = re.sub(r"```", "", code)
+        return code.strip()
 
-            # Remove markdown if model adds it
-            generated_code = re.sub(r"```python", "", generated_code)
-            generated_code = re.sub(r"```", "", generated_code)
+    try:
+        code = generate_code()
 
-            st.markdown('<div class="section-title">Generated Pandas Code</div>', unsafe_allow_html=True)
-            st.code(generated_code, language="python")
+        # Security block
+        banned = ["import os", "import sys", "subprocess", "eval(", "exec(", "open("]
+        if any(b in code for b in banned):
+            st.error("Unsafe code detected. Execution blocked.")
+            st.stop()
 
-            # Safe execution
-            safe_globals = {"pd": pd}
-            safe_locals = {"df": df.copy()}
+        local_env = {"df": df.copy(), "pd": pd}
+        exec(code, {}, local_env)
+        transformed_df = local_env["df"]
 
-            exec(generated_code, safe_globals, safe_locals)
+    except Exception as e:
+        code = generate_code(str(e))
+        local_env = {"df": df.copy(), "pd": pd}
+        exec(code, {}, local_env)
+        transformed_df = local_env["df"]
 
-            transformed_df = safe_locals["df"]
+    st.markdown('<div class="section-title">Generated Code</div>', unsafe_allow_html=True)
+    st.code(code)
 
-            st.markdown('<div class="section-title">Transformed Output</div>', unsafe_allow_html=True)
-            st.dataframe(transformed_df, use_container_width=True)
+    st.markdown('<div class="section-title">Transformed Output</div>', unsafe_allow_html=True)
+    st.dataframe(transformed_df, use_container_width=True)
 
-            csv = transformed_df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                "Download Transformed CSV",
-                csv,
-                "transformed.csv",
-                "text/csv"
-            )
+    # Audit Log
+    audit = pd.DataFrame({
+        "Timestamp": [datetime.datetime.now()],
+        "Prompt": [business_prompt],
+        "Rows Before": [original_count],
+        "Rows After": [len(transformed_df)]
+    })
 
-        except Exception as e:
-            st.error(f"Execution Error: {e}")
+    # Excel Export
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        transformed_df.to_excel(writer, sheet_name="Transformed_Data", index=False)
+        audit.to_excel(writer, sheet_name="Audit_Log", index=False)
+
+    st.download_button(
+        "Download Excel Report",
+        output.getvalue(),
+        "enterprise_etl_output.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+# ===================================
+# ======== AI JIRA ENGINE ===========
+# ===================================
+
+if jira_clicked:
+
+    if not business_prompt.strip():
+        st.warning("Please enter business description.")
+        st.stop()
+
+    jira_prompt = """
+You are a Senior Agile Delivery Manager.
+
+Generate:
+- One Epic
+- Multiple User Stories
+- Acceptance Criteria for each
+- Subtasks
+
+Return structured professional format.
+"""
+
+    response = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[
+            {"role": "system", "content": jira_prompt},
+            {"role": "user", "content": business_prompt}
+        ],
+        temperature=0.3
+    )
+
+    jira_output = response.choices[0].message.content
+
+    st.markdown('<div class="section-title">Jira Breakdown</div>', unsafe_allow_html=True)
+    st.markdown(jira_output)
