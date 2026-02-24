@@ -57,6 +57,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     st.error("Set GROQ_API_KEY in Streamlit Secrets.")
     st.stop()
+
 client = Groq(api_key=GROQ_API_KEY)
 
 # -----------------------------------
@@ -71,17 +72,27 @@ if "history" not in st.session_state:
 tab1, tab2 = st.tabs(["AI ETL Engine", "AI Jira Breakdown"])
 
 # ===================================
-# ========== AI ETL TAB =============
+# ========== AI ETL TAB ============
 # ===================================
+
 with tab1:
+
     st.markdown('<div class="section-title">Business Description</div>', unsafe_allow_html=True)
-    etl_prompt = st.text_area("Describe data transformation", key="etl_prompt", height=140)
+
+    etl_prompt = st.text_area(
+        "Describe data transformation",
+        key="etl_prompt",
+        height=140
+    )
+
     uploaded_file = st.file_uploader("Upload CSV File", type=["csv"], key="etl_upload")
 
     if st.button("Execute ETL"):
+
         if not etl_prompt.strip():
             st.warning("Enter transformation description.")
             st.stop()
+
         if not uploaded_file:
             st.warning("Upload CSV file.")
             st.stop()
@@ -89,10 +100,9 @@ with tab1:
         df = pd.read_csv(uploaded_file)
         original_rows = len(df)
 
-        # -----------------------------------
-        # Generate AI code safely
-        # -----------------------------------
-        system_prompt = f"""
+        with st.spinner("Generating enterprise transformation..."):
+
+            system_prompt = f"""
 You are a Senior Enterprise Data Engineer.
 
 STRICT RULES:
@@ -107,64 +117,49 @@ STRICT RULES:
 - Columns available: {df.columns.tolist()}
 """
 
-        def generate_code(error=None):
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": etl_prompt}
-            ]
-            if error:
-                messages.append({"role": "user", "content": f"Fix error: {error}"})
+            def generate_code(error=None):
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": etl_prompt}
+                ]
+                if error:
+                    messages.append({"role": "user", "content": f"Fix error: {error}"})
 
-            response = client.chat.completions.create(
-                model="llama-3.1-8b-instant",
-                messages=messages,
-                temperature=0.1
-            )
-            code = response.choices[0].message.content
+                response = client.chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    messages=messages,
+                    temperature=0.1
+                )
+                code = response.choices[0].message.content
+                code = re.sub(r"```python", "", code)
+                code = re.sub(r"```", "", code)
+                return code.strip()
 
-            # ----------------
-            # SANITIZE CODE
-            # ----------------
-            code = re.sub(r"```.*?```", "", code, flags=re.DOTALL)
-            code_lines = code.splitlines()
-            # Keep only lines that look like code
-            code_lines = [line for line in code_lines if line.strip() and not line.strip().startswith("This line of code")]
-            return "\n".join(code_lines).strip()
-
-        try:
-            code = generate_code()
-            banned = ["import os", "import sys", "subprocess", "eval(", "exec(", "open("]
-            if any(b in code for b in banned):
-                st.error("Unsafe code detected.")
-                st.stop()
-
-            local_env = {"df": df.copy(), "pd": pd}
             try:
+                code = generate_code()
+
+                banned = ["import os", "import sys", "subprocess", "eval(", "exec(", "open("]
+                if any(b in code for b in banned):
+                    st.error("Unsafe code detected.")
+                    st.stop()
+
+                local_env = {"df": df.copy(), "pd": pd}
                 exec(code, {}, local_env)
                 transformed_df = local_env["df"]
-            except SyntaxError as se:
-                st.error(f"Syntax error in generated code: {se}")
-                transformed_df = df.copy()
+
             except Exception as e:
-                st.error(f"Error executing code: {e}")
-                transformed_df = df.copy()
+                code = generate_code(str(e))
+                local_env = {"df": df.copy(), "pd": pd}
+                exec(code, {}, local_env)
+                transformed_df = local_env["df"]
 
-        except Exception as e:
-            st.error(f"Failed to generate transformation code: {e}")
-            transformed_df = df.copy()
-
-        # -----------------------------------
-        # Display output
-        # -----------------------------------
         st.subheader("Generated Code")
         st.code(code)
 
         st.subheader("Transformed Output")
         st.dataframe(transformed_df, use_container_width=True)
 
-        # -----------------------------------
         # Save history
-        # -----------------------------------
         st.session_state.history.append({
             "Time": datetime.datetime.now(),
             "Prompt": etl_prompt,
@@ -172,17 +167,28 @@ STRICT RULES:
             "Rows After": len(transformed_df)
         })
 
-        # -----------------------------------
-        # Export
-        # -----------------------------------
+        # -----------------------------
+        # ETL EXPORT SECTION
+        # -----------------------------
         st.markdown('<div class="section-title">Export Results</div>', unsafe_allow_html=True)
+
         col1, col2 = st.columns(2)
+
+        # CSV Download
         csv_data = transformed_df.to_csv(index=False).encode("utf-8")
-        col1.download_button("Download CSV", csv_data, "etl_output.csv", "text/csv")
+        col1.download_button(
+            "Download CSV",
+            csv_data,
+            "etl_output.csv",
+            "text/csv"
+        )
+
+        # Excel Download
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             transformed_df.to_excel(writer, sheet_name="Transformed_Data", index=False)
             pd.DataFrame(st.session_state.history).to_excel(writer, sheet_name="Audit_Log", index=False)
+
         col2.download_button(
             "Download Excel",
             output.getvalue(),
@@ -193,16 +199,25 @@ STRICT RULES:
 # ===================================
 # ========== JIRA TAB ==============
 # ===================================
+
 with tab2:
+
     st.markdown('<div class="section-title">Business Description</div>', unsafe_allow_html=True)
-    jira_prompt = st.text_area("Describe feature or initiative", key="jira_prompt", height=140)
+
+    jira_prompt = st.text_area(
+        "Describe feature or initiative",
+        key="jira_prompt",
+        height=140
+    )
 
     if st.button("Generate Jira Breakdown"):
+
         if not jira_prompt.strip():
             st.warning("Enter business description.")
             st.stop()
 
         with st.spinner("Generating Agile breakdown..."):
+
             jira_system_prompt = """
 You are a Senior Agile Delivery Manager.
 
@@ -214,6 +229,7 @@ Generate:
 
 Return structured professional format.
 """
+
             response = client.chat.completions.create(
                 model="llama-3.1-8b-instant",
                 messages=[
@@ -222,18 +238,34 @@ Return structured professional format.
                 ],
                 temperature=0.3
             )
+
             jira_output = response.choices[0].message.content
 
         st.subheader("Jira Breakdown")
         st.markdown(jira_output)
 
+        # -----------------------------
+        # JIRA EXPORT SECTION
+        # -----------------------------
         st.markdown('<div class="section-title">Export Jira Output</div>', unsafe_allow_html=True)
+
         col1, col2 = st.columns(2)
-        col1.download_button("Download as TXT", jira_output, "jira_breakdown.txt", "text/plain")
+
+        # TXT Download
+        col1.download_button(
+            "Download as TXT",
+            jira_output,
+            "jira_breakdown.txt",
+            "text/plain"
+        )
+
+        # Excel Download
         jira_df = pd.DataFrame({"Jira Breakdown": [jira_output]})
+
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             jira_df.to_excel(writer, sheet_name="Jira_Output", index=False)
+
         col2.download_button(
             "Download as Excel",
             output.getvalue(),
@@ -244,8 +276,10 @@ Return structured professional format.
 # ===================================
 # HISTORY PANEL
 # ===================================
+
 st.markdown("---")
 st.markdown('<div class="section-title">Transformation History</div>', unsafe_allow_html=True)
+
 if st.session_state.history:
     st.dataframe(pd.DataFrame(st.session_state.history))
 else:
