@@ -1,203 +1,186 @@
 import streamlit as st
 from huggingface_hub import InferenceClient
 import os
-import re
 
-# ------------------ Custom CSS (Full Wells Fargo Page Header + Professional Font) ------------------
+# =====================================================
+# PAGE CONFIG
+# =====================================================
+st.set_page_config(
+    page_title="AI-PO-Assistantce",
+    layout="wide"
+)
+
+# =====================================================
+# CUSTOM CSS (Enterprise Header Style)
+# =====================================================
 st.markdown(
     """
     <style>
-    /* Full-page header */
     .page-header {
         width: 100%;
-        background-color: #E41B17; /* Wells Fargo Red */
-        color: #FFD700;           /* Wells Fargo Yellow */
+        background-color: #E41B17;
+        color: #FFD700;
         padding: 25px 20px;
-        font-family: 'Poppins', sans-serif;
-        text-align: left;
-        font-size: 2rem;
+        font-size: 28px;
         font-weight: 700;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.2);
-        border-radius: 0px;
-        margin-bottom: 10px;
-    }
-
-    /* Subtitle / description */
-    .page-subtitle {
-        width: 100%;
         text-align: left;
-        font-size: 1rem;   /* smaller, professional font */
-        color: #333333;
+    }
+    .page-subtitle {
+        font-size: 14px;
         margin-bottom: 25px;
-        font-weight: 500;
+        color: #333333;
     }
-
-    /* Buttons */
-    div.stButton > button:first-child {
+    div.stButton > button {
         background-color: #E41B17;
         color: #FFD700;
-        border-radius: 12px;
-        padding: 10px 25px;
+        border-radius: 8px;
+        padding: 8px 18px;
         font-weight: 600;
-        transition: all 0.3s ease;
-    }
-    div.stButton > button:first-child:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 8px 20px rgba(0,0,0,0.2);
-    }
-
-    /* Textarea input */
-    textarea {
-        border-radius: 12px !important;
-        padding: 10px !important;
-        font-size: 16px;
-        border: 1px solid #E41B17 !important;
-    }
-
-    /* Epic cards */
-    .epic {
-        background: #FFF5F5; 
-        padding: 15px;
-        border-radius: 15px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.05);
-        margin-bottom: 20px;
-        border-left: 5px solid #E41B17;
-    }
-
-    /* Story cards */
-    .story-card {
-        background: #ffffff;
-        border-radius: 15px;
-        padding: 15px;
-        margin-bottom: 15px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.05);
-        border-left: 5px solid #E41B17;
-    }
-
-    /* Download button */
-    .stDownloadButton>button {
-        background-color: #E41B17;
-        color: #FFD700;
-        border-radius: 12px;
-        padding: 8px 20px;
-        font-weight: 600;
-    }
-    .stDownloadButton>button:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 6px 15px rgba(0,0,0,0.2);
     }
     </style>
     """,
     unsafe_allow_html=True
 )
 
-# ------------------ Full Width Header ------------------
-st.markdown('<div class="page-header">AI‑PO‑Assistantce</div>', unsafe_allow_html=True)
-st.markdown('<div class="page-subtitle">Convert Enterprise Business Requirements into Jira-ready Markdown</div>', unsafe_allow_html=True)
+st.markdown('<div class="page-header">AI-PO-Assistantce</div>', unsafe_allow_html=True)
+st.markdown('<div class="page-subtitle">Convert Enterprise Business Requirements into Jira-ready Markdown & Perform AI-based ETL Transformations</div>', unsafe_allow_html=True)
 
-# ------------------ Hugging Face Setup ------------------
+# =====================================================
+# HUGGING FACE SETUP
+# =====================================================
 HF_TOKEN = os.getenv("HF_TOKEN")
+
 if not HF_TOKEN:
-    st.error("HF_TOKEN not found. Add it in Settings → Secrets on Streamlit Cloud.")
+    st.error("HF_TOKEN not found. Add it in Streamlit Cloud → Settings → Secrets.")
     st.stop()
 
 client = InferenceClient(token=HF_TOKEN)
 
-# ------------------ User Input ------------------
-st.markdown("### Enter Business Requirement")
-requirement_text = st.text_area("📄 Type Business Requirement", height=200)
-uploaded_file = st.file_uploader("📂 Or upload a .txt file with the requirement", type=["txt"])
+# =====================================================
+# INPUT SECTION
+# =====================================================
+st.markdown("### 📄 Business Requirement / Transformation Description")
+requirement_text = st.text_area("Enter Business Requirement", height=200)
 
-requirement_file = ""
+uploaded_file = st.file_uploader("📂 Upload Input File (.txt)", type=["txt"])
+
+file_content = ""
 if uploaded_file is not None:
-    try:
-        requirement_file = uploaded_file.read().decode("utf-8", errors="ignore")
-        st.info("Uploaded file preview (first 500 characters):")
-        st.text(requirement_file[:500])
-    except Exception as e:
-        st.error(f"Error reading file: {e}")
+    file_content = uploaded_file.read().decode("utf-8", errors="ignore")
+    st.info("Uploaded file preview (first 500 chars)")
+    st.text(file_content[:500])
 
-requirement = requirement_file if uploaded_file else requirement_text
+requirement = requirement_text.strip()
 
-# ------------------ Generate Breakdown ------------------
-if st.button("🚀 Generate Breakdown"):
+# =====================================================
+# BUTTONS
+# =====================================================
+col1, col2 = st.columns(2)
 
-    if not requirement.strip():
-        st.warning("Please enter or upload a requirement.")
-    else:
-        with st.spinner("Generating structured breakdown..."):
+# =====================================================
+# 🚀 JIRA BREAKDOWN BUTTON
+# =====================================================
+with col1:
+    if st.button("🚀 Generate Jira Breakdown"):
 
-            prompt = f"""
-You are a Senior Enterprise Business Analyst with expertise in Jira and Agile methodology.
+        if not requirement:
+            st.warning("Please enter Business Requirement.")
+        else:
+            with st.spinner("Generating Jira structured output..."):
 
-Convert the following business requirement into structured Markdown suitable for Jira.
+                prompt = f"""
+You are a Senior Enterprise Business Analyst.
 
-Guidelines:
-- Create a clear Epic with Title and Description.
-- Generate multiple User Stories if required.
-- Each User Story should have:
+Convert the following business requirement into Jira-ready Markdown.
+
+Include:
+- Epic (Title + Description)
+- Multiple User Stories
+- Each Story must include:
     - Title
-    - Role (As a ...)
-    - Goal (I want ...)
-    - Reason (So that ...)
-- Include Acceptance Criteria for each story in bullet points.
-- Include Subtasks for each story in bullet points.
+    - Role
+    - Goal
+    - Reason
+    - Acceptance Criteria
+    - Subtasks
 
 Business Requirement:
 {requirement}
 """
 
-            try:
-                response = client.chat.completions.create(
-                    model="Qwen/Qwen2.5-7B-Instruct",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=1500,
-                    temperature=0.3
-                )
-                output = response.choices[0].message.content
-            except Exception as e:
-                st.error(f"Error calling Hugging Face API: {e}")
-                st.stop()
+                try:
+                    response = client.chat.completions.create(
+                        model="Qwen/Qwen2.5-7B-Instruct",
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=1500,
+                        temperature=0.3
+                    )
 
-            # ------------------ Display Epic ------------------
-            epic_match = re.search(
-                r"# Epic\s*- Title:(.*?)(?:- Description:)?(.*?)(?=\n# User Stories)",
-                output,
-                re.DOTALL
-            )
-            if epic_match:
-                epic_title = epic_match.group(1).strip()
-                epic_desc = epic_match.group(2).strip()
-                st.markdown(f"""
-<div class="epic">
-<h3>🏷️ Epic</h3>
-<p><b>Title:</b> {epic_title}</p>
-<p><b>Description:</b> {epic_desc}</p>
-</div>
-""", unsafe_allow_html=True)
+                    jira_output = response.choices[0].message.content
 
-            # ------------------ Display User Stories ------------------
-            user_stories = re.split(r"## Story \d+: Title", output)
-            if len(user_stories) > 1:
-                st.markdown("## 📋 User Stories")
-                for i, story in enumerate(user_stories[1:], 1):
-                    story_text = story.strip()\
-                        .replace("**As a**", "**Role:**")\
-                        .replace("**I want**", "**Goal:**")\
-                        .replace("**So that**", "**Reason:**")
-                    st.markdown(f"""
-<div class="story-card">
-<h4>Story {i}</h4>
-<p>{story_text.replace(chr(10), '<br>')}</p>
-</div>
-""", unsafe_allow_html=True)
-            else:
-                st.markdown(output)
+                    st.markdown("### 📋 Jira Markdown Output")
+                    st.text_area("Output", jira_output, height=400)
 
-            # ------------------ Download Button ------------------
-            st.download_button(
-                label="💾 Download Jira Markdown",
-                data=output,
-                file_name="jira_breakdown.md",
-                mime="text/markdown"
-            )
+                    st.download_button(
+                        label="💾 Download Jira Markdown",
+                        data=jira_output,
+                        file_name="jira_output.md",
+                        mime="text/markdown"
+                    )
+
+                except Exception as e:
+                    st.error(f"API Error: {e}")
+
+# =====================================================
+# 🔄 ETL TRANSFORMATION BUTTON
+# =====================================================
+with col2:
+    if st.button("🔄 Generate ETL Transformation"):
+
+        if not requirement:
+            st.warning("Please provide Transformation Description.")
+        elif not file_content:
+            st.warning("Please upload input file for ETL.")
+        else:
+            with st.spinner("Performing AI ETL transformation..."):
+
+                etl_prompt = f"""
+You are a Senior Data Engineer.
+
+Perform ETL transformation based on the business logic provided.
+
+Business Transformation Description:
+{requirement}
+
+Input Data:
+{file_content}
+
+Instructions:
+1. Extract required fields.
+2. Apply transformation rules.
+3. Provide final structured clean output in CSV format.
+4. Output only transformed data.
+"""
+
+                try:
+                    response = client.chat.completions.create(
+                        model="Qwen/Qwen2.5-7B-Instruct",
+                        messages=[{"role": "user", "content": etl_prompt}],
+                        max_tokens=2000,
+                        temperature=0.2
+                    )
+
+                    etl_output = response.choices[0].message.content
+
+                    st.markdown("### 📊 ETL Transformed Output")
+                    st.text_area("Transformed Data", etl_output, height=400)
+
+                    st.download_button(
+                        label="💾 Download ETL Output",
+                        data=etl_output,
+                        file_name="etl_output.csv",
+                        mime="text/csv"
+                    )
+
+                except Exception as e:
+                    st.error(f"API Error: {e}")
