@@ -1,154 +1,115 @@
 import streamlit as st
 import pandas as pd
-from io import BytesIO
-from groq import Groq
+import os
 import re
+from groq import Groq
 
-# ==========================================================
+# -----------------------------------
 # PAGE CONFIG
-# ==========================================================
+# -----------------------------------
 st.set_page_config(
     page_title="Enterprise AI ETL Engine",
     layout="wide"
 )
 
-# ==========================================================
-# HEADER
-# ==========================================================
-st.markdown("""
-<style>
-.header {
-    background-color:#b31b1b;
-    padding:20px;
-    text-align:center;
-}
-.header h1{
-    color:#ffcc00;
-    margin:0;
-}
-.stButton button {
-    background-color:#b31b1b;
-    color:white;
-    font-weight:bold;
-}
-</style>
-""", unsafe_allow_html=True)
+st.title("🚀 Enterprise AI ETL Transformation Engine")
 
-st.markdown("""
-<div class="header">
-<h1>Enterprise AI ETL Engine (AI Powered)</h1>
-</div>
-""", unsafe_allow_html=True)
+# -----------------------------------
+# GROQ CONFIG
+# -----------------------------------
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-st.divider()
+if not GROQ_API_KEY:
+    st.error("GROQ_API_KEY not found in environment variables.")
+    st.stop()
 
-# ==========================================================
-# GROQ CLIENT
-# ==========================================================
-GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 client = Groq(api_key=GROQ_API_KEY)
 
-# ==========================================================
-# LLM → PANDAS CODE GENERATOR
-# ==========================================================
-def generate_pandas_code(columns, user_prompt):
+# -----------------------------------
+# FILE UPLOAD
+# -----------------------------------
+uploaded_file = st.file_uploader("Upload CSV file", type=["csv"])
 
-    system_prompt = f"""
-You are a senior Pandas data engineer.
+if uploaded_file:
+    df = pd.read_csv(uploaded_file)
 
-DataFrame name: df
-Available columns: {columns}
+    st.subheader("📊 Original Data")
+    st.dataframe(df)
 
-STRICT RULES:
-- Output ONLY executable Python pandas code.
-- Do NOT explain anything.
-- Do NOT use markdown.
-- Do NOT import anything.
-- Do NOT redefine df.
-- Modify df directly.
-- Final result must remain in df.
-"""
-
-    response = client.chat.completions.create(
-      model="llama-3.1-8b-instant",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        temperature=0.1,
+    prompt = st.text_area(
+        "Describe your transformation (example: remove records where last_name = kumar and create full_name column)"
     )
 
-    content = response.choices[0].message.content
+    if st.button("🚀 Run Transformation"):
 
-    # Clean markdown if model adds it
-    content = re.sub(r"```.*?```", "", content, flags=re.DOTALL)
-    content = content.replace("```python", "").replace("```", "").strip()
+        with st.spinner("Generating enterprise-grade Pandas code..."):
 
-    return content
+            system_prompt = f"""
+You are a Senior Python Data Engineer working in an enterprise banking environment.
 
-# ==========================================================
-# SAFE EXECUTION ENGINE
-# ==========================================================
-def execute_code(df, code):
+STRICT RULES:
 
-    # Block dangerous patterns
-    forbidden = ["import", "__", "os.", "sys.", "eval", "exec(", "open(", "subprocess"]
-    for word in forbidden:
-        if word in code:
-            raise Exception("Unsafe code detected.")
+1. The dataframe name is df.
+2. Always handle null values using fillna("") before string operations.
+3. Always use case-insensitive comparison (.str.lower()).
+4. Always strip spaces (.str.strip()).
+5. Never use inplace=True.
+6. Never use print statements.
+7. Never explain anything.
+8. Return ONLY executable Python code.
+9. If filtering strings, always use this pattern:
 
-    allowed_globals = {"pd": pd}
-    local_vars = {"df": df.copy()}
+df = df[~df["column"].fillna("").str.strip().str.lower().eq("value")]
 
-    exec(code, allowed_globals, local_vars)
+10. If creating new columns, use vectorized pandas operations.
+11. Never assume column exists without using exact column names provided.
+12. Columns available: {df.columns.tolist()}
 
-    return local_vars["df"]
+Return only Python code.
+"""
 
-# ==========================================================
-# UI
-# ==========================================================
-uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
-
-prompt = st.text_area(
-    "Describe your transformation",
-    placeholder="Example: remove records where Email starts with pradeep"
-)
-
-if st.button("Run AI Transformation"):
-
-    if not uploaded_file or not prompt:
-        st.error("Upload file and enter transformation.")
-    else:
-        df = pd.read_csv(uploaded_file)
-
-        st.subheader("Original Data")
-        st.dataframe(df.head())
-
-        with st.spinner("Generating AI transformation logic..."):
             try:
-                code = generate_pandas_code(df.columns.tolist(), prompt)
+                response = client.chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.1,
+                )
+
+                generated_code = response.choices[0].message.content.strip()
+
+                # -----------------------------------
+                # CLEAN LLM OUTPUT (remove markdown)
+                # -----------------------------------
+                generated_code = re.sub(r"```python", "", generated_code)
+                generated_code = re.sub(r"```", "", generated_code)
+
+                st.subheader("🧠 Generated Pandas Code")
+                st.code(generated_code, language="python")
+
+                # -----------------------------------
+                # SAFE EXECUTION ENVIRONMENT
+                # -----------------------------------
+                safe_globals = {"pd": pd}
+                safe_locals = {"df": df.copy()}
+
+                exec(generated_code, safe_globals, safe_locals)
+
+                transformed_df = safe_locals["df"]
+
+                st.subheader("✅ Transformed Data")
+                st.dataframe(transformed_df)
+
+                csv = transformed_df.to_csv(index=False).encode("utf-8")
+
+                st.download_button(
+                    "📥 Download Transformed CSV",
+                    csv,
+                    "transformed.csv",
+                    "text/csv"
+                )
+
             except Exception as e:
-                st.error(f"Model Error: {e}")
-                st.stop()
-
-        st.subheader("Generated Pandas Code")
-        st.code(code, language="python")
-
-        try:
-            updated_df = execute_code(df, code)
-
-            st.subheader("Transformed Data")
-            st.dataframe(updated_df)
-
-            csv_buffer = BytesIO()
-            updated_df.to_csv(csv_buffer, index=False)
-
-            st.download_button(
-                "Download Transformed CSV",
-                csv_buffer.getvalue(),
-                file_name="transformed_output.csv",
-                mime="text/csv"
-            )
-
-        except Exception as e:
-            st.error(f"Execution Error: {e}")
+                st.error(f"Execution Error: {e}")
