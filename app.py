@@ -1,57 +1,44 @@
 import streamlit as st
 from huggingface_hub import InferenceClient
+import pandas as pd
 import os
+import io
 
 # =====================================================
 # PAGE CONFIG
 # =====================================================
-st.set_page_config(
-    page_title="AI-PO-Assistantce",
-    layout="wide"
-)
+st.set_page_config(page_title="ReqIntel AI", layout="wide")
 
 # =====================================================
-# CUSTOM CSS (Enterprise Header Style)
+# ENTERPRISE HEADER
 # =====================================================
-st.markdown(
-    """
-    <style>
-    .page-header {
-        width: 100%;
-        background-color: #E41B17;
-        color: #FFD700;
-        padding: 25px 20px;
-        font-size: 28px;
-        font-weight: 700;
-        text-align: left;
-    }
-    .page-subtitle {
-        font-size: 14px;
-        margin-bottom: 25px;
-        color: #333333;
-    }
-    div.stButton > button {
-        background-color: #E41B17;
-        color: #FFD700;
-        border-radius: 8px;
-        padding: 8px 18px;
-        font-weight: 600;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+st.markdown("""
+<style>
+.page-header {
+    width:100%;
+    background-color:#E41B17;
+    color:#FFD700;
+    padding:25px;
+    font-size:28px;
+    font-weight:700;
+}
+.sub-header {
+    font-size:14px;
+    margin-bottom:20px;
+}
+</style>
+""", unsafe_allow_html=True)
 
-st.markdown('<div class="page-header">AI-PO-Assistantce</div>', unsafe_allow_html=True)
-st.markdown('<div class="page-subtitle">Convert Enterprise Business Requirements into Jira-ready Markdown & Perform AI-based ETL Transformations</div>', unsafe_allow_html=True)
+st.markdown('<div class="page-header">ReqIntel AI – Hybrid ETL Platform</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Enterprise AI + Deterministic Pandas Transformation Engine</div>', unsafe_allow_html=True)
 
 # =====================================================
-# HUGGING FACE SETUP
+# HF SETUP
 # =====================================================
 HF_TOKEN = os.getenv("HF_TOKEN")
 
 if not HF_TOKEN:
-    st.error("HF_TOKEN not found. Add it in Streamlit Cloud → Settings → Secrets.")
+    st.error("HF_TOKEN missing. Add in Streamlit Secrets.")
     st.stop()
 
 client = InferenceClient(token=HF_TOKEN)
@@ -59,128 +46,105 @@ client = InferenceClient(token=HF_TOKEN)
 # =====================================================
 # INPUT SECTION
 # =====================================================
-st.markdown("### 📄 Business Requirement / Transformation Description")
-requirement_text = st.text_area("Enter Business Requirement", height=200)
+st.markdown("### Business Transformation Description")
+business_logic = st.text_area("Describe transformation rules", height=150)
 
-uploaded_file = st.file_uploader("📂 Upload Input File (.txt)", type=["txt"])
-
-file_content = ""
-if uploaded_file is not None:
-    file_content = uploaded_file.read().decode("utf-8", errors="ignore")
-    st.info("Uploaded file preview (first 500 chars)")
-    st.text(file_content[:500])
-
-requirement = requirement_text.strip()
+uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
 
 # =====================================================
-# BUTTONS
+# HYBRID ETL FUNCTION
 # =====================================================
-col1, col2 = st.columns(2)
+def deterministic_etl(df):
+    audit_log = []
+
+    # Remove duplicates
+    before = len(df)
+    df = df.drop_duplicates()
+    audit_log.append(f"Removed {before - len(df)} duplicate records")
+
+    # Remove negative amounts if column exists
+    if "Amount" in df.columns:
+        before = len(df)
+        df = df[df["Amount"] >= 0]
+        audit_log.append(f"Removed {before - len(df)} negative amount records")
+
+    # Standardize currency
+    if "Currency" in df.columns:
+        df["Currency"] = df["Currency"].str.upper()
+        audit_log.append("Standardized currency to uppercase")
+
+    # Normalize dates
+    for col in df.columns:
+        if "date" in col.lower():
+            df[col] = pd.to_datetime(df[col], errors="coerce").dt.strftime("%Y-%m-%d")
+            audit_log.append(f"Standardized date format for {col}")
+
+    return df, audit_log
 
 # =====================================================
-# 🚀 JIRA BREAKDOWN BUTTON
+# AI DERIVED LOGIC
 # =====================================================
-with col1:
-    if st.button("🚀 Generate Jira Breakdown"):
+def ai_generate_metadata(description):
+    prompt = f"""
+You are a Senior Data Architect.
 
-        if not requirement:
-            st.warning("Please enter Business Requirement.")
-        else:
-            with st.spinner("Generating Jira structured output..."):
+Based on this transformation description:
+{description}
 
-                prompt = f"""
-You are a Senior Enterprise Business Analyst.
+Generate:
+1. Derived column logic (if any)
+2. Risk scoring rules
+3. Data quality rules
+4. Audit summary
 
-Convert the following business requirement into Jira-ready Markdown.
-
-Include:
-- Epic (Title + Description)
-- Multiple User Stories
-- Each Story must include:
-    - Title
-    - Role
-    - Goal
-    - Reason
-    - Acceptance Criteria
-    - Subtasks
-
-Business Requirement:
-{requirement}
+Keep it structured and concise.
 """
+    response = client.chat.completions.create(
+        model="Qwen/Qwen2.5-7B-Instruct",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=800,
+        temperature=0.2
+    )
 
-                try:
-                    response = client.chat.completions.create(
-                        model="Qwen/Qwen2.5-7B-Instruct",
-                        messages=[{"role": "user", "content": prompt}],
-                        max_tokens=1500,
-                        temperature=0.3
-                    )
-
-                    jira_output = response.choices[0].message.content
-
-                    st.markdown("### 📋 Jira Markdown Output")
-                    st.text_area("Output", jira_output, height=400)
-
-                    st.download_button(
-                        label="💾 Download Jira Markdown",
-                        data=jira_output,
-                        file_name="jira_output.md",
-                        mime="text/markdown"
-                    )
-
-                except Exception as e:
-                    st.error(f"API Error: {e}")
+    return response.choices[0].message.content
 
 # =====================================================
-# 🔄 ETL TRANSFORMATION BUTTON
+# RUN HYBRID PIPELINE
 # =====================================================
-with col2:
-    if st.button("🔄 Generate ETL Transformation"):
+if st.button("🚀 Run Hybrid AI + Pandas ETL"):
 
-        if not requirement:
-            st.warning("Please provide Transformation Description.")
-        elif not file_content:
-            st.warning("Please upload input file for ETL.")
-        else:
-            with st.spinner("Performing AI ETL transformation..."):
+    if not uploaded_file:
+        st.warning("Please upload a CSV file.")
+        st.stop()
 
-                etl_prompt = f"""
-You are a Senior Data Engineer.
+    df = pd.read_csv(uploaded_file)
 
-Perform ETL transformation based on the business logic provided.
+    st.subheader("Original Data Preview")
+    st.dataframe(df.head())
 
-Business Transformation Description:
-{requirement}
+    # Deterministic ETL
+    df_cleaned, audit = deterministic_etl(df)
 
-Input Data:
-{file_content}
+    # AI Layer
+    ai_metadata = ai_generate_metadata(business_logic) if business_logic else "No business logic provided."
 
-Instructions:
-1. Extract required fields.
-2. Apply transformation rules.
-3. Provide final structured clean output in CSV format.
-4. Output only transformed data.
-"""
+    st.subheader("Transformed Data")
+    st.dataframe(df_cleaned)
 
-                try:
-                    response = client.chat.completions.create(
-                        model="Qwen/Qwen2.5-7B-Instruct",
-                        messages=[{"role": "user", "content": etl_prompt}],
-                        max_tokens=2000,
-                        temperature=0.2
-                    )
+    # Download
+    csv_buffer = io.StringIO()
+    df_cleaned.to_csv(csv_buffer, index=False)
 
-                    etl_output = response.choices[0].message.content
+    st.download_button(
+        label="Download Cleaned CSV",
+        data=csv_buffer.getvalue(),
+        file_name="cleaned_output.csv",
+        mime="text/csv"
+    )
 
-                    st.markdown("### 📊 ETL Transformed Output")
-                    st.text_area("Transformed Data", etl_output, height=400)
+    st.subheader("AI Transformation Insights")
+    st.text_area("AI Metadata Output", ai_metadata, height=250)
 
-                    st.download_button(
-                        label="💾 Download ETL Output",
-                        data=etl_output,
-                        file_name="etl_output.csv",
-                        mime="text/csv"
-                    )
-
-                except Exception as e:
-                    st.error(f"API Error: {e}")
+    st.subheader("Audit Log")
+    for log in audit:
+        st.write("•", log)
