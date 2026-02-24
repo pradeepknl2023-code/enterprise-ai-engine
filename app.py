@@ -41,6 +41,50 @@ st.markdown("""
     background-color: #8E1414;
     color: #FFC72C;
 }
+
+/* Switch styling */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 60px;
+  height: 28px;
+  margin-top: 10px;
+}
+
+.switch input { 
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.slider {
+  position: absolute;
+  cursor: pointer;
+  background-color: #ccc;
+  border-radius: 34px;
+  top: 0; left: 0; right: 0; bottom: 0;
+  transition: .4s;
+}
+
+.slider:before {
+  position: absolute;
+  content: "";
+  height: 22px;
+  width: 22px;
+  left: 3px;
+  bottom: 3px;
+  background-color: white;
+  border-radius: 50%;
+  transition: .4s;
+}
+
+input:checked + .slider {
+  background-color: #B31B1B;
+}
+
+input:checked + .slider:before {
+  transform: translateX(32px);
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -72,13 +116,11 @@ if "history" not in st.session_state:
 tab1, tab2 = st.tabs(["AI ETL Engine", "AI Jira Breakdown"])
 
 # ===================================
-# ========== AI ETL TAB ============
+# ========== AI ETL TAB =============
 # ===================================
 
 with tab1:
-
     st.markdown('<div class="section-title">Business Description</div>', unsafe_allow_html=True)
-
     etl_prompt = st.text_area(
         "Describe data transformation",
         key="etl_prompt",
@@ -87,22 +129,37 @@ with tab1:
 
     uploaded_file = st.file_uploader("Upload CSV File", type=["csv"], key="etl_upload")
 
-    if st.button("Execute ETL"):
+    # ---------------------------
+    # Spark toggle as switch
+    # ---------------------------
+    st.markdown('<div class="section-title">ETL Engine Selection</div>', unsafe_allow_html=True)
+    use_spark_html = """
+    <label class="switch">
+      <input type="checkbox" id="spark_switch">
+      <span class="slider"></span>
+    </label>
+    <span style="margin-left:10px;font-weight:bold;">Enable Spark Engine for Large Datasets</span>
+    """
+    st.markdown(use_spark_html, unsafe_allow_html=True)
+    use_spark = st.checkbox("", value=False, key="spark_toggle_hidden")
 
+    if st.button("Execute ETL"):
         if not etl_prompt.strip():
             st.warning("Enter transformation description.")
             st.stop()
-
         if not uploaded_file:
             st.warning("Upload CSV file.")
             st.stop()
 
-        df = pd.read_csv(uploaded_file)
-        original_rows = len(df)
+        # ---------------------------
+        # Pandas ETL
+        # ---------------------------
+        if not use_spark:
+            df = pd.read_csv(uploaded_file)
+            original_rows = len(df)
 
-        with st.spinner("Generating enterprise transformation..."):
-
-            system_prompt = f"""
+            with st.spinner("Generating enterprise transformation..."):
+                system_prompt = f"""
 You are a Senior Enterprise Data Engineer.
 
 STRICT RULES:
@@ -117,78 +174,118 @@ STRICT RULES:
 - Columns available: {df.columns.tolist()}
 """
 
-            def generate_code(error=None):
+                def generate_code(error=None):
+                    messages = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": etl_prompt}
+                    ]
+                    if error:
+                        messages.append({"role": "user", "content": f"Fix error: {error}"})
+
+                    response = client.chat.completions.create(
+                        model="llama-3.1-8b-instant",
+                        messages=messages,
+                        temperature=0.1
+                    )
+                    code = response.choices[0].message.content
+                    code = re.sub(r"```python", "", code)
+                    code = re.sub(r"```", "", code)
+                    return code.strip()
+
+                try:
+                    code = generate_code()
+                    banned = ["import os", "import sys", "subprocess", "eval(", "exec(", "open("]
+                    if any(b in code for b in banned):
+                        st.error("Unsafe code detected.")
+                        st.stop()
+                    local_env = {"df": df.copy(), "pd": pd}
+                    exec(code, {}, local_env)
+                    transformed_df = local_env["df"]
+
+                except Exception as e:
+                    code = generate_code(str(e))
+                    local_env = {"df": df.copy(), "pd": pd}
+                    exec(code, {}, local_env)
+                    transformed_df = local_env["df"]
+
+            st.subheader("Generated Code")
+            st.code(code)
+            st.subheader("Transformed Output")
+            st.dataframe(transformed_df, use_container_width=True)
+
+        # ---------------------------
+        # PySpark ETL
+        # ---------------------------
+        else:
+            from pyspark.sql import SparkSession
+            from pyspark.sql.functions import col, trim, lit
+
+            spark = SparkSession.builder.appName("EnterpriseETL").getOrCreate()
+            df_spark = spark.read.csv(uploaded_file, header=True, inferSchema=True)
+            original_rows = df_spark.count()
+
+            with st.spinner("Generating enterprise Spark transformation..."):
+                columns_list = df_spark.columns
+                system_prompt_spark = f"""
+You are a Senior Enterprise Data Engineer.
+
+STRICT RULES:
+- DataFrame name is df_spark
+- Use PySpark DataFrame operations only
+- Handle nulls using fillna("")
+- Strip string columns using trim()
+- Return ONLY executable PySpark Python code
+- Columns available: {columns_list}
+"""
                 messages = [
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": system_prompt_spark},
                     {"role": "user", "content": etl_prompt}
                 ]
-                if error:
-                    messages.append({"role": "user", "content": f"Fix error: {error}"})
 
                 response = client.chat.completions.create(
                     model="llama-3.1-8b-instant",
                     messages=messages,
                     temperature=0.1
                 )
+
                 code = response.choices[0].message.content
                 code = re.sub(r"```python", "", code)
                 code = re.sub(r"```", "", code)
-                return code.strip()
+                code = code.strip()
 
-            try:
-                code = generate_code()
-
-                banned = ["import os", "import sys", "subprocess", "eval(", "exec(", "open("]
-                if any(b in code for b in banned):
-                    st.error("Unsafe code detected.")
-                    st.stop()
-
-                local_env = {"df": df.copy(), "pd": pd}
+                local_env = {"df_spark": df_spark, "spark": spark, "col": col, "trim": trim, "lit": lit}
                 exec(code, {}, local_env)
-                transformed_df = local_env["df"]
+                transformed_df_spark = local_env["df_spark"]
 
-            except Exception as e:
-                code = generate_code(str(e))
-                local_env = {"df": df.copy(), "pd": pd}
-                exec(code, {}, local_env)
-                transformed_df = local_env["df"]
+            st.subheader("Generated Spark Code")
+            st.code(code)
+            st.subheader("Transformed Spark Output")
+            st.dataframe(transformed_df_spark.toPandas(), use_container_width=True)
 
-        st.subheader("Generated Code")
-        st.code(code)
-
-        st.subheader("Transformed Output")
-        st.dataframe(transformed_df, use_container_width=True)
-
+        # ---------------------------
         # Save history
+        # ---------------------------
+        rows_after = len(transformed_df) if not use_spark else transformed_df_spark.count()
         st.session_state.history.append({
             "Time": datetime.datetime.now(),
             "Prompt": etl_prompt,
+            "Engine": "Spark" if use_spark else "Pandas",
             "Rows Before": original_rows,
-            "Rows After": len(transformed_df)
+            "Rows After": rows_after
         })
 
-        # -----------------------------
-        # ETL EXPORT SECTION
-        # -----------------------------
+        # ---------------------------
+        # Export results
+        # ---------------------------
         st.markdown('<div class="section-title">Export Results</div>', unsafe_allow_html=True)
-
         col1, col2 = st.columns(2)
-
-        # CSV Download
-        csv_data = transformed_df.to_csv(index=False).encode("utf-8")
-        col1.download_button(
-            "Download CSV",
-            csv_data,
-            "etl_output.csv",
-            "text/csv"
-        )
-
-        # Excel Download
+        output_df = transformed_df if not use_spark else transformed_df_spark.toPandas()
+        csv_data = output_df.to_csv(index=False).encode("utf-8")
+        col1.download_button("Download CSV", csv_data, "etl_output.csv", "text/csv")
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            transformed_df.to_excel(writer, sheet_name="Transformed_Data", index=False)
+            output_df.to_excel(writer, sheet_name="Transformed_Data", index=False)
             pd.DataFrame(st.session_state.history).to_excel(writer, sheet_name="Audit_Log", index=False)
-
         col2.download_button(
             "Download Excel",
             output.getvalue(),
@@ -201,9 +298,7 @@ STRICT RULES:
 # ===================================
 
 with tab2:
-
     st.markdown('<div class="section-title">Business Description</div>', unsafe_allow_html=True)
-
     jira_prompt = st.text_area(
         "Describe feature or initiative",
         key="jira_prompt",
@@ -211,13 +306,10 @@ with tab2:
     )
 
     if st.button("Generate Jira Breakdown"):
-
         if not jira_prompt.strip():
             st.warning("Enter business description.")
             st.stop()
-
         with st.spinner("Generating Agile breakdown..."):
-
             jira_system_prompt = """
 You are a Senior Agile Delivery Manager.
 
@@ -229,7 +321,6 @@ Generate:
 
 Return structured professional format.
 """
-
             response = client.chat.completions.create(
                 model="llama-3.1-8b-instant",
                 messages=[
@@ -238,34 +329,18 @@ Return structured professional format.
                 ],
                 temperature=0.3
             )
-
             jira_output = response.choices[0].message.content
 
         st.subheader("Jira Breakdown")
         st.markdown(jira_output)
 
-        # -----------------------------
-        # JIRA EXPORT SECTION
-        # -----------------------------
         st.markdown('<div class="section-title">Export Jira Output</div>', unsafe_allow_html=True)
-
         col1, col2 = st.columns(2)
-
-        # TXT Download
-        col1.download_button(
-            "Download as TXT",
-            jira_output,
-            "jira_breakdown.txt",
-            "text/plain"
-        )
-
-        # Excel Download
+        col1.download_button("Download as TXT", jira_output, "jira_breakdown.txt", "text/plain")
         jira_df = pd.DataFrame({"Jira Breakdown": [jira_output]})
-
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             jira_df.to_excel(writer, sheet_name="Jira_Output", index=False)
-
         col2.download_button(
             "Download as Excel",
             output.getvalue(),
@@ -276,10 +351,8 @@ Return structured professional format.
 # ===================================
 # HISTORY PANEL
 # ===================================
-
 st.markdown("---")
 st.markdown('<div class="section-title">Transformation History</div>', unsafe_allow_html=True)
-
 if st.session_state.history:
     st.dataframe(pd.DataFrame(st.session_state.history))
 else:
