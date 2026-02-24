@@ -1,249 +1,131 @@
 import streamlit as st
 from huggingface_hub import InferenceClient
 import os
-import re
 
-# ------------------ Page Config ------------------
+# --------------------------------------------------
+# PAGE CONFIG
+# --------------------------------------------------
 st.set_page_config(
     page_title="Requirements Intelligence Platform",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="collapsed"
 )
 
-# ------------------ Enterprise Dark Theme ------------------
+# --------------------------------------------------
+# HUGGINGFACE CONFIG
+# --------------------------------------------------
+HF_TOKEN = os.getenv("HF_TOKEN")  # Set in Streamlit secrets or HF Spaces
+MODEL_NAME = "meta-llama/Meta-Llama-3-8B-Instruct"
+
+client = InferenceClient(
+    model=MODEL_NAME,
+    token=HF_TOKEN
+)
+
+# --------------------------------------------------
+# STYLING
+# --------------------------------------------------
 st.markdown("""
 <style>
-
-/* Remove default Streamlit padding */
 .block-container {
     padding-top: 0rem !important;
-    padding-left: 2rem !important;
-    padding-right: 2rem !important;
+    padding-left: 2rem;
+    padding-right: 2rem;
 }
 
-/* Full page background */
-.stApp {
-    background-color: #0f172a;  /* Dark background */
-    color: white;
-    font-family: Arial, sans-serif;
-}
-
-/* Full width header */
-.enterprise-header {
-    width: 100%;
-    padding: 25px;
-    font-size: 28px;
-    font-weight: bold;
-    background-color: #b91c1c;  /* Wells Fargo red */
-    color: #fbbf24;             /* Yellow text */
-    letter-spacing: 1px;
+.main-header {
+    background: linear-gradient(90deg, #b5121b, #d71e28);
+    padding: 25px 10px;
     text-align: center;
-    text-shadow: 1px 1px 2px rgba(0,0,0,0.5);
+    color: #ffd700;
+    font-size: 26px;
+    font-weight: 700;
+    width: 100vw;
+    margin-left: calc(-50vw + 50%);
 }
 
-/* Subtitle */
-.enterprise-subtitle {
+.sub-header {
     text-align: center;
-    font-size: 16px;
-    padding: 10px 0 25px 0;
-    color: #e2e8f0;
-}
-
-/* Section titles */
-h3 {
-    color: #fbbf24;
-}
-
-/* Buttons */
-div.stButton > button:first-child {
-    background-color: #b91c1c;
-    color: #fbbf24;
-    border-radius: 8px;
-    padding: 10px 25px;
-    font-weight: bold;
-    border: none;
-}
-div.stButton > button:first-child:hover {
-    background-color: #991b1b;
-}
-
-/* Download Button */
-.stDownloadButton > button {
-    background-color: #b91c1c;
-    color: #fbbf24;
-    border-radius: 8px;
-    padding: 8px 20px;
-    font-weight: bold;
-    border: none;
-}
-.stDownloadButton > button:hover {
-    background-color: #991b1b;
-}
-
-/* Textarea */
-textarea {
-    background-color: #1e293b !important;
-    color: white !important;
-    border: 1px solid #b91c1c !important;
-    border-radius: 8px !important;
-}
-
-/* Cards */
-.epic, .story-card {
-    background: #1e293b;
-    padding: 15px;
-    border-radius: 10px;
-    margin-bottom: 15px;
-    border-left: 4px solid #b91c1c;
-}
-
-/* Footer */
-.enterprise-footer {
-    text-align: center;
-    padding: 15px;
     font-size: 14px;
-    background: #1e293b;
-    color: #cbd5e1;
-    margin-top: 40px;
+    color: #f0f0f0;
+    background-color: #0e1a2b;
+    padding: 8px;
+    width: 100vw;
+    margin-left: calc(-50vw + 50%);
 }
 
+.section-title {
+    font-size: 18px;
+    font-weight: 600;
+    margin-top: 25px;
+}
+
+body, p, div {
+    font-size: 14px !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
-# ------------------ Header ------------------
-st.markdown(
-    '<div class="enterprise-header">Requirements Intelligence Platform</div>',
-    unsafe_allow_html=True
+# --------------------------------------------------
+# HEADER
+# --------------------------------------------------
+st.markdown('<div class="main-header">Requirements Intelligence Platform</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Enterprise AI Requirements → Jira Story Engine</div>', unsafe_allow_html=True)
+
+# --------------------------------------------------
+# INPUT
+# --------------------------------------------------
+st.markdown('<div class="section-title">Enter Business Requirement</div>', unsafe_allow_html=True)
+
+business_input = st.text_area(
+    "",
+    height=200,
+    placeholder="Example: Build a secure loan transfer system with approval workflow and dashboard tracking..."
 )
 
-st.markdown(
-    '<div class="enterprise-subtitle">Enterprise AI Requirements & Story Engine</div>',
-    unsafe_allow_html=True
-)
+# --------------------------------------------------
+# PROMPT TEMPLATE
+# --------------------------------------------------
+def build_prompt(requirement):
+    return f"""
+You are a senior Agile Business Analyst.
 
-# ------------------ Hugging Face Setup ------------------
-HF_TOKEN = os.getenv("HF_TOKEN")
+Convert the following enterprise business requirement into Jira-ready Markdown format.
 
-if not HF_TOKEN:
-    st.error("HF_TOKEN not found. Add it in Settings → Secrets.")
-    st.stop()
-
-client = InferenceClient(token=HF_TOKEN)
-
-# ------------------ User Input ------------------
-st.markdown("### Enter Business Requirement")
-
-requirement_text = st.text_area(
-    "Type Business Requirement",
-    height=200
-)
-
-uploaded_file = st.file_uploader(
-    "Or upload a .txt file",
-    type=["txt"]
-)
-
-requirement_file = ""
-
-if uploaded_file is not None:
-    try:
-        requirement_file = uploaded_file.read().decode("utf-8", errors="ignore")
-        st.info("Uploaded file preview (first 500 characters):")
-        st.text(requirement_file[:500])
-    except Exception as e:
-        st.error(f"Error reading file: {e}")
-
-requirement = requirement_file if uploaded_file else requirement_text
-
-# ------------------ Generate Breakdown ------------------
-if st.button("Generate Breakdown"):
-
-    if not requirement.strip():
-        st.warning("Please enter or upload a requirement.")
-    else:
-        with st.spinner("Generating structured breakdown..."):
-
-            prompt = f"""
-You are a Senior Enterprise Business Analyst with expertise in Jira and Agile methodology.
-
-Convert the following business requirement into structured Markdown suitable for Jira.
-
-Guidelines:
-- Create a clear Epic with Title and Description.
-- Generate multiple User Stories if required.
-- Each User Story should have:
-    - Title
-    - Role (As a ...)
-    - Goal (I want ...)
-    - Reason (So that ...)
-- Include Acceptance Criteria in bullet points.
-- Include Subtasks in bullet points.
+Format strictly as:
+- Epic
+- Multiple User Stories
+- Each story must include:
+    - As a / I want / So that
+    - Acceptance Criteria (bullet list)
+    - Subtasks (bullet list)
 
 Business Requirement:
 {requirement}
 """
 
-            try:
-                response = client.chat.completions.create(
-                    model="Qwen/Qwen2.5-7B-Instruct",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=1500,
-                    temperature=0.3
-                )
+# --------------------------------------------------
+# GENERATE BUTTON
+# --------------------------------------------------
+if st.button("Generate AI Jira Markdown"):
 
-                output = response.choices[0].message.content
+    if not business_input.strip():
+        st.warning("Please enter business requirement.")
+    else:
+        with st.spinner("Generating AI-powered Jira stories..."):
 
-            except Exception as e:
-                st.error(f"Error calling Hugging Face API: {e}")
-                st.stop()
-
-            # ------------------ Display Epic ------------------
-            epic_match = re.search(
-                r"# Epic\s*- Title:(.*?)(?:- Description:)?(.*?)(?=\n# User Stories)",
-                output,
-                re.DOTALL
+            response = client.text_generation(
+                build_prompt(business_input),
+                max_new_tokens=1200,
+                temperature=0.4
             )
 
-            if epic_match:
-                epic_title = epic_match.group(1).strip()
-                epic_desc = epic_match.group(2).strip()
+        st.markdown('<div class="section-title">Jira-Ready Markdown Output</div>', unsafe_allow_html=True)
+        st.code(response, language="markdown")
 
-                st.markdown(f"""
-                <div class="epic">
-                <h3>Epic</h3>
-                <p><b>Title:</b> {epic_title}</p>
-                <p><b>Description:</b> {epic_desc}</p>
-                </div>
-                """, unsafe_allow_html=True)
-
-            # ------------------ Display User Stories ------------------
-            user_stories = re.split(r"## Story \d+: Title", output)
-
-            if len(user_stories) > 1:
-                st.markdown("### User Stories")
-
-                for i, story in enumerate(user_stories[1:], 1):
-                    story_text = story.strip()
-
-                    st.markdown(f"""
-                    <div class="story-card">
-                    <h4>Story {i}</h4>
-                    <p>{story_text.replace(chr(10), '<br>')}</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-            else:
-                st.markdown(output)
-
-            # ------------------ Download Button ------------------
-            st.download_button(
-                label="Download Jira Markdown",
-                data=output,
-                file_name="jira_breakdown.md",
-                mime="text/markdown"
-            )
-
-# ------------------ Footer ------------------
-st.markdown(
-    '<div class="enterprise-footer">© 2026 Requirements Intelligence Platform | Enterprise AI Suite</div>',
-    unsafe_allow_html=True
-)
+        st.download_button(
+            "Download Markdown",
+            response,
+            file_name="jira_requirements.md",
+            mime="text/markdown"
+        )
