@@ -70,30 +70,30 @@ if "history" not in st.session_state:
 # -----------------------------------
 def safe_exec(df, code):
     """
-    Execute AI-generated code safely by removing any non-Python lines.
+    Safely execute only Python code from AI-generated content.
     """
-    # Remove triple backticks
-    code = re.sub(r"```.*?```", "", code, flags=re.DOTALL)
+    # Extract Python code blocks
+    python_blocks = re.findall(r"```python(.*?)```", code, flags=re.DOTALL)
+    if not python_blocks:
+        code = re.sub(r"```.*?```", "", code, flags=re.DOTALL)
+        python_blocks = [code]
     
-    # Keep only lines that look like Python assignments or pandas operations
-    code_lines = code.splitlines()
-    python_lines = []
-    for line in code_lines:
-        stripped = line.strip()
-        if not stripped:
+    executed = df.copy()
+    for block in python_blocks:
+        block_lines = block.splitlines()
+        # Keep lines that look like Python code
+        python_lines = [line for line in block_lines if re.search(r"^\s*(df|pd|import|from|\w+.*=)", line)]
+        cleaned_code = "\n".join(python_lines)
+        if not cleaned_code.strip():
             continue
-        # Keep only lines with '=', '(', '.', '[', or start with df/pd
-        if any(c in stripped for c in ["=", "(", ".", "["]) or stripped.startswith(("df", "pd")):
-            python_lines.append(line)
-    cleaned_code = "\n".join(python_lines)
-    
-    local_env = {"df": df.copy(), "pd": pd}
-    try:
-        exec(cleaned_code, {}, local_env)
-        return local_env["df"]
-    except Exception as e:
-        st.error(f"Failed to execute AI-generated code: {e}")
-        return df
+        local_env = {"df": executed.copy(), "pd": pd}
+        try:
+            exec(cleaned_code, {}, local_env)
+            executed = local_env["df"]
+        except Exception as e:
+            st.error(f"Failed to execute AI code block: {e}")
+            return df
+    return executed
 
 # -----------------------------------
 # TABS
@@ -119,6 +119,7 @@ with tab1:
         df = pd.read_csv(uploaded_file)
         original_rows = len(df)
 
+        # System prompt for AI
         system_prompt = f"""
 You are a Senior Enterprise Data Engineer.
 
