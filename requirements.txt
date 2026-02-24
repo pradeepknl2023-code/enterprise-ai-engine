@@ -2,4 +2,3 @@ streamlit
 pandas
 groq
 xlsxwriter
-pyspark
