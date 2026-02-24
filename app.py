@@ -26,24 +26,30 @@ st.markdown("""
     color:#ffcc00;
     margin:0;
 }
+.stButton button {
+    background-color:#b31b1b;
+    color:white;
+    font-weight:bold;
+}
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown("""
 <div class="header">
-<h1>Enterprise AI ETL Engine</h1>
+<h1>Enterprise AI ETL Engine (Free AI Mode)</h1>
 </div>
 """, unsafe_allow_html=True)
 
 st.divider()
 
 # ==========================================================
-# HUGGINGFACE CLIENT
+# HUGGINGFACE CLIENT (STABLE FREE MODEL)
 # ==========================================================
+
 HF_TOKEN = st.secrets["HF_TOKEN"]
 
 client = InferenceClient(
-    model="mistralai/Mistral-7B-Instruct-v0.2",
+    model="HuggingFaceH4/zephyr-7b-beta",
     token=HF_TOKEN
 )
 
@@ -53,36 +59,48 @@ client = InferenceClient(
 def generate_pandas_code(columns, user_prompt):
 
     system_prompt = f"""
-You are an expert Pandas engineer.
+You are a senior Pandas data engineer.
 
 DataFrame name: df
 Available columns: {columns}
 
-Rules:
-- Return ONLY executable pandas code.
+STRICT RULES:
+- Output ONLY executable Python pandas code.
 - Do NOT explain anything.
 - Do NOT use markdown.
-- Do NOT import libraries.
+- Do NOT import anything.
+- Do NOT redefine df.
 - Modify df directly.
-- Final output must remain in variable df.
+- Final output must remain stored in df.
 """
 
-    full_prompt = system_prompt + "\nUser request: " + user_prompt
-
-    response = client.text_generation(
-        full_prompt,
-        max_new_tokens=300,
+    response = client.chat_completion(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        max_tokens=400,
         temperature=0.1
     )
 
-    # Clean accidental markdown
-    response = re.sub(r"```.*?```", "", response, flags=re.DOTALL)
-    return response.strip()
+    content = response.choices[0].message.content
+
+    # Clean markdown if model adds it
+    content = re.sub(r"```.*?```", "", content, flags=re.DOTALL)
+    content = content.replace("```python", "").replace("```", "").strip()
+
+    return content
 
 # ==========================================================
-# SAFE EXECUTION
+# SAFE EXECUTION ENGINE
 # ==========================================================
 def execute_code(df, code):
+
+    # Block dangerous patterns
+    forbidden = ["import", "__", "os.", "sys.", "eval", "exec", "open(", "subprocess"]
+    for word in forbidden:
+        if word in code:
+            raise Exception("Unsafe code detected.")
 
     allowed_globals = {"pd": pd}
     local_vars = {"df": df.copy()}
@@ -94,8 +112,12 @@ def execute_code(df, code):
 # ==========================================================
 # UI
 # ==========================================================
-uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
-prompt = st.text_area("Describe transformation")
+
+uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
+prompt = st.text_area(
+    "Describe your transformation",
+    placeholder="Example: remove records where Email starts with pradeep"
+)
 
 if st.button("Run AI Transformation"):
 
@@ -107,8 +129,12 @@ if st.button("Run AI Transformation"):
         st.subheader("Original Data")
         st.dataframe(df.head())
 
-        with st.spinner("Generating Pandas transformation via AI..."):
-            code = generate_pandas_code(df.columns.tolist(), prompt)
+        with st.spinner("AI generating Pandas transformation..."):
+            try:
+                code = generate_pandas_code(df.columns.tolist(), prompt)
+            except Exception as e:
+                st.error(f"Model Error: {e}")
+                st.stop()
 
         st.subheader("Generated Pandas Code")
         st.code(code, language="python")
@@ -119,12 +145,12 @@ if st.button("Run AI Transformation"):
             st.subheader("Transformed Data")
             st.dataframe(updated_df)
 
-            csv = BytesIO()
-            updated_df.to_csv(csv, index=False)
+            csv_buffer = BytesIO()
+            updated_df.to_csv(csv_buffer, index=False)
 
             st.download_button(
-                "Download Result",
-                csv.getvalue(),
+                "Download Transformed CSV",
+                csv_buffer.getvalue(),
                 file_name="transformed_output.csv",
                 mime="text/csv"
             )
