@@ -12,7 +12,7 @@ from io import BytesIO
 st.set_page_config(page_title="Enterprise AI Platform", layout="wide")
 
 # -----------------------------------
-# ENTERPRISE THEME + Switch CSS
+# ENTERPRISE THEME
 # -----------------------------------
 st.markdown("""
 <style>
@@ -41,37 +41,6 @@ st.markdown("""
     background-color: #8E1414;
     color: #FFC72C;
 }
-
-/* Switch styling */
-.switch {
-  position: relative;
-  display: inline-block;
-  width: 60px;
-  height: 28px;
-  margin-top: 10px;
-}
-.switch input { opacity: 0; width: 0; height: 0; }
-.slider {
-  position: absolute;
-  cursor: pointer;
-  background-color: #ccc;
-  border-radius: 34px;
-  top: 0; left: 0; right: 0; bottom: 0;
-  transition: .4s;
-}
-.slider:before {
-  position: absolute;
-  content: "";
-  height: 22px;
-  width: 22px;
-  left: 3px;
-  bottom: 3px;
-  background-color: white;
-  border-radius: 50%;
-  transition: .4s;
-}
-input:checked + .slider { background-color: #B31B1B; }
-input:checked + .slider:before { transform: translateX(32px); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -97,16 +66,6 @@ if "history" not in st.session_state:
     st.session_state.history = []
 
 # -----------------------------------
-# CHECK SPARK AVAILABILITY
-# -----------------------------------
-try:
-    from pyspark.sql import SparkSession
-    from pyspark.sql.functions import col, trim, lit
-    spark_available = True
-except (ModuleNotFoundError, Exception):
-    spark_available = False
-
-# -----------------------------------
 # TABS
 # -----------------------------------
 tab1, tab2 = st.tabs(["AI ETL Engine", "AI Jira Breakdown"])
@@ -119,16 +78,6 @@ with tab1:
     etl_prompt = st.text_area("Describe data transformation", key="etl_prompt", height=140)
     uploaded_file = st.file_uploader("Upload CSV File", type=["csv"], key="etl_upload")
 
-    # ---------------------------
-    # Spark toggle
-    # ---------------------------
-    st.markdown('<div class="section-title">ETL Engine Selection</div>', unsafe_allow_html=True)
-    if spark_available:
-        use_spark = st.checkbox("Enable Spark Engine for Large Datasets", value=False, key="spark_toggle_hidden")
-    else:
-        use_spark = False
-        st.info("PySpark not available: Spark Engine disabled.")
-
     if st.button("Execute ETL"):
         if not etl_prompt.strip():
             st.warning("Enter transformation description.")
@@ -137,15 +86,13 @@ with tab1:
             st.warning("Upload CSV file.")
             st.stop()
 
-        # -----------------------------------
-        # PANDAS ETL
-        # -----------------------------------
-        if not use_spark:
-            df = pd.read_csv(uploaded_file)
-            original_rows = len(df)
+        df = pd.read_csv(uploaded_file)
+        original_rows = len(df)
 
-            with st.spinner("Generating enterprise transformation..."):
-                system_prompt = f"""
+        # -----------------------------------
+        # Generate AI code safely
+        # -----------------------------------
+        system_prompt = f"""
 You are a Senior Enterprise Data Engineer.
 
 STRICT RULES:
@@ -160,121 +107,81 @@ STRICT RULES:
 - Columns available: {df.columns.tolist()}
 """
 
-                def generate_code(error=None):
-                    messages = [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": etl_prompt}
-                    ]
-                    if error:
-                        messages.append({"role": "user", "content": f"Fix error: {error}"})
+        def generate_code(error=None):
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": etl_prompt}
+            ]
+            if error:
+                messages.append({"role": "user", "content": f"Fix error: {error}"})
 
-                    response = client.chat.completions.create(
-                        model="llama-3.1-8b-instant",
-                        messages=messages,
-                        temperature=0.1
-                    )
-                    code = response.choices[0].message.content
+            response = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=messages,
+                temperature=0.1
+            )
+            code = response.choices[0].message.content
 
-                    # ----------------
-                    # SANITIZE CODE
-                    # ----------------
-                    code = re.sub(r"```python", "", code, flags=re.IGNORECASE)
-                    code = re.sub(r"```", "", code)
-                    code_lines = code.splitlines()
-                    code_lines = [line for line in code_lines if not line.strip().startswith("This line of code")]
-                    return "\n".join(code_lines).strip()
+            # ----------------
+            # SANITIZE CODE
+            # ----------------
+            code = re.sub(r"```.*?```", "", code, flags=re.DOTALL)
+            code_lines = code.splitlines()
+            # Keep only lines that look like code
+            code_lines = [line for line in code_lines if line.strip() and not line.strip().startswith("This line of code")]
+            return "\n".join(code_lines).strip()
 
-                try:
-                    code = generate_code()
-                    banned = ["import os", "import sys", "subprocess", "eval(", "exec(", "open("]
-                    if any(b in code for b in banned):
-                        st.error("Unsafe code detected.")
-                        st.stop()
-
-                    local_env = {"df": df.copy(), "pd": pd}
-                    exec(code, {}, local_env)
-                    transformed_df = local_env["df"]
-
-                except SyntaxError as se:
-                    st.error(f"Syntax error in generated code: {se}")
-                    st.stop()
-
-            st.subheader("Generated Code")
-            st.code(code)
-            st.subheader("Transformed Output")
-            st.dataframe(transformed_df, use_container_width=True)
-
-        # -----------------------------------
-        # SPARK ETL
-        # -----------------------------------
-        else:
-            try:
-                spark = SparkSession.builder.appName("EnterpriseETL").getOrCreate()
-                df_spark = spark.read.csv(uploaded_file, header=True, inferSchema=True)
-                original_rows = df_spark.count()
-
-                with st.spinner("Generating Spark transformation..."):
-                    columns_list = df_spark.columns
-                    system_prompt_spark = f"""
-You are a Senior Enterprise Data Engineer.
-
-STRICT RULES:
-- DataFrame name is df_spark
-- Use PySpark DataFrame operations only
-- Handle nulls using fillna("")
-- Strip string columns using trim()
-- Return ONLY executable PySpark Python code
-- Columns available: {columns_list}
-"""
-                    messages = [
-                        {"role": "system", "content": system_prompt_spark},
-                        {"role": "user", "content": etl_prompt}
-                    ]
-                    response = client.chat.completions.create(
-                        model="llama-3.1-8b-instant",
-                        messages=messages,
-                        temperature=0.1
-                    )
-                    code = response.choices[0].message.content
-                    code = re.sub(r"```python", "", code)
-                    code = re.sub(r"```", "", code).strip()
-
-                    local_env = {"df_spark": df_spark, "spark": spark, "col": col, "trim": trim, "lit": lit}
-                    exec(code, {}, local_env)
-                    transformed_df_spark = local_env["df_spark"]
-
-                st.subheader("Generated Spark Code")
-                st.code(code)
-                st.subheader("Transformed Spark Output")
-                st.dataframe(transformed_df_spark.toPandas(), use_container_width=True)
-
-            except Exception as e:
-                st.error(f"Spark ETL failed: {e}")
+        try:
+            code = generate_code()
+            banned = ["import os", "import sys", "subprocess", "eval(", "exec(", "open("]
+            if any(b in code for b in banned):
+                st.error("Unsafe code detected.")
                 st.stop()
 
+            local_env = {"df": df.copy(), "pd": pd}
+            try:
+                exec(code, {}, local_env)
+                transformed_df = local_env["df"]
+            except SyntaxError as se:
+                st.error(f"Syntax error in generated code: {se}")
+                transformed_df = df.copy()
+            except Exception as e:
+                st.error(f"Error executing code: {e}")
+                transformed_df = df.copy()
+
+        except Exception as e:
+            st.error(f"Failed to generate transformation code: {e}")
+            transformed_df = df.copy()
+
         # -----------------------------------
-        # SAVE HISTORY
+        # Display output
         # -----------------------------------
-        rows_after = len(transformed_df) if not use_spark else transformed_df_spark.count()
+        st.subheader("Generated Code")
+        st.code(code)
+
+        st.subheader("Transformed Output")
+        st.dataframe(transformed_df, use_container_width=True)
+
+        # -----------------------------------
+        # Save history
+        # -----------------------------------
         st.session_state.history.append({
             "Time": datetime.datetime.now(),
             "Prompt": etl_prompt,
-            "Engine": "Spark" if use_spark else "Pandas",
             "Rows Before": original_rows,
-            "Rows After": rows_after
+            "Rows After": len(transformed_df)
         })
 
         # -----------------------------------
-        # EXPORT RESULTS
+        # Export
         # -----------------------------------
         st.markdown('<div class="section-title">Export Results</div>', unsafe_allow_html=True)
         col1, col2 = st.columns(2)
-        output_df = transformed_df if not use_spark else transformed_df_spark.toPandas()
-        csv_data = output_df.to_csv(index=False).encode("utf-8")
+        csv_data = transformed_df.to_csv(index=False).encode("utf-8")
         col1.download_button("Download CSV", csv_data, "etl_output.csv", "text/csv")
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            output_df.to_excel(writer, sheet_name="Transformed_Data", index=False)
+            transformed_df.to_excel(writer, sheet_name="Transformed_Data", index=False)
             pd.DataFrame(st.session_state.history).to_excel(writer, sheet_name="Audit_Log", index=False)
         col2.download_button(
             "Download Excel",
