@@ -3,33 +3,33 @@ from huggingface_hub import InferenceClient
 import os
 import re
 
-# ------------------ Custom CSS (Full Wells Fargo Branding) ------------------
+# ------------------ Custom CSS (Full Wells Fargo Page Header + Professional Font) ------------------
 st.markdown(
     """
     <style>
-    /* App background & font */
-    .stApp {
-        background-color: #ffffff; 
-        font-family: 'Poppins', sans-serif;
-    }
-
-    /* Header section */
-    .app-header {
+    /* Full-page header */
+    .page-header {
+        width: 100%;
         background-color: #E41B17; /* Wells Fargo Red */
         color: #FFD700;           /* Wells Fargo Yellow */
-        text-align: center;
-        padding: 20px;
-        border-radius: 10px;
-        font-size: 2.5rem;
+        padding: 25px 20px;
+        font-family: 'Poppins', sans-serif;
+        text-align: left;
+        font-size: 2rem;
         font-weight: 700;
-        margin-bottom: 30px;
         box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        border-radius: 0px;
+        margin-bottom: 10px;
     }
 
-    /* Section titles */
-    h2, h3, h4 {
-        color: #E41B17;
-        font-weight: 700;
+    /* Subtitle / description */
+    .page-subtitle {
+        width: 100%;
+        text-align: left;
+        font-size: 1rem;   /* smaller, professional font */
+        color: #333333;
+        margin-bottom: 25px;
+        font-weight: 500;
     }
 
     /* Buttons */
@@ -91,9 +91,9 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# ------------------ Header ------------------
-st.markdown('<div class="app-header">AI‑PO‑Assistantce</div>', unsafe_allow_html=True)
-st.markdown("### Convert Enterprise Business Requirements into Jira-ready Markdown")
+# ------------------ Full Width Header ------------------
+st.markdown('<div class="page-header">AI‑PO‑Assistantce</div>', unsafe_allow_html=True)
+st.markdown('<div class="page-subtitle">Convert Enterprise Business Requirements into Jira-ready Markdown</div>', unsafe_allow_html=True)
 
 # ------------------ Hugging Face Setup ------------------
 HF_TOKEN = os.getenv("HF_TOKEN")
