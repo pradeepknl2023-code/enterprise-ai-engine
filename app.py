@@ -30,6 +30,7 @@ st.markdown("""
     color: #B31B1B;
     font-weight: 600;
     font-size: 20px;
+    margin-top: 20px;
 }
 .stButton>button {
     background-color: #B31B1B;
@@ -39,11 +40,6 @@ st.markdown("""
 .stButton>button:hover {
     background-color: #8E1414;
     color: #FFC72C;
-}
-.history-box {
-    background-color: #f7f7f7;
-    padding: 10px;
-    border-radius: 6px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -65,7 +61,7 @@ if not GROQ_API_KEY:
 client = Groq(api_key=GROQ_API_KEY)
 
 # -----------------------------------
-# SESSION STATE INIT
+# SESSION STATE
 # -----------------------------------
 if "history" not in st.session_state:
     st.session_state.history = []
@@ -83,19 +79,17 @@ with tab1:
 
     st.markdown('<div class="section-title">Business Description</div>', unsafe_allow_html=True)
 
-    business_prompt = st.text_area(
+    etl_prompt = st.text_area(
         "Describe data transformation",
         key="etl_prompt",
-        height=150
+        height=140
     )
 
-    spark_mode = st.toggle("Enable Spark Mode (for large datasets)", value=False)
-
-    uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
+    uploaded_file = st.file_uploader("Upload CSV File", type=["csv"], key="etl_upload")
 
     if st.button("Execute ETL"):
 
-        if not business_prompt.strip():
+        if not etl_prompt.strip():
             st.warning("Enter transformation description.")
             st.stop()
 
@@ -126,7 +120,7 @@ STRICT RULES:
             def generate_code(error=None):
                 messages = [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": business_prompt}
+                    {"role": "user", "content": etl_prompt}
                 ]
                 if error:
                     messages.append({"role": "user", "content": f"Fix error: {error}"})
@@ -144,7 +138,6 @@ STRICT RULES:
             try:
                 code = generate_code()
 
-                # Security block
                 banned = ["import os", "import sys", "subprocess", "eval(", "exec(", "open("]
                 if any(b in code for b in banned):
                     st.error("Unsafe code detected.")
@@ -166,25 +159,40 @@ STRICT RULES:
         st.subheader("Transformed Output")
         st.dataframe(transformed_df, use_container_width=True)
 
-        # Audit
-        audit = {
+        # Save history
+        st.session_state.history.append({
             "Time": datetime.datetime.now(),
-            "Prompt": business_prompt,
+            "Prompt": etl_prompt,
             "Rows Before": original_rows,
             "Rows After": len(transformed_df)
-        }
-        st.session_state.history.append(audit)
+        })
 
-        # Excel export
+        # -----------------------------
+        # ETL EXPORT SECTION
+        # -----------------------------
+        st.markdown('<div class="section-title">Export Results</div>', unsafe_allow_html=True)
+
+        col1, col2 = st.columns(2)
+
+        # CSV Download
+        csv_data = transformed_df.to_csv(index=False).encode("utf-8")
+        col1.download_button(
+            "Download CSV",
+            csv_data,
+            "etl_output.csv",
+            "text/csv"
+        )
+
+        # Excel Download
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             transformed_df.to_excel(writer, sheet_name="Transformed_Data", index=False)
             pd.DataFrame(st.session_state.history).to_excel(writer, sheet_name="Audit_Log", index=False)
 
-        st.download_button(
-            "Download Excel Report",
+        col2.download_button(
+            "Download Excel",
             output.getvalue(),
-            "enterprise_output.xlsx",
+            "etl_output.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
@@ -196,15 +204,15 @@ with tab2:
 
     st.markdown('<div class="section-title">Business Description</div>', unsafe_allow_html=True)
 
-    jira_prompt_input = st.text_area(
+    jira_prompt = st.text_area(
         "Describe feature or initiative",
         key="jira_prompt",
-        height=150
+        height=140
     )
 
     if st.button("Generate Jira Breakdown"):
 
-        if not jira_prompt_input.strip():
+        if not jira_prompt.strip():
             st.warning("Enter business description.")
             st.stop()
 
@@ -219,25 +227,54 @@ Generate:
 - Acceptance Criteria
 - Subtasks
 
-Return professional structured format.
+Return structured professional format.
 """
 
             response = client.chat.completions.create(
                 model="llama-3.1-8b-instant",
                 messages=[
                     {"role": "system", "content": jira_system_prompt},
-                    {"role": "user", "content": jira_prompt_input}
+                    {"role": "user", "content": jira_prompt}
                 ],
                 temperature=0.3
             )
 
-            output = response.choices[0].message.content
+            jira_output = response.choices[0].message.content
 
         st.subheader("Jira Breakdown")
-        st.markdown(output)
+        st.markdown(jira_output)
+
+        # -----------------------------
+        # JIRA EXPORT SECTION
+        # -----------------------------
+        st.markdown('<div class="section-title">Export Jira Output</div>', unsafe_allow_html=True)
+
+        col1, col2 = st.columns(2)
+
+        # TXT Download
+        col1.download_button(
+            "Download as TXT",
+            jira_output,
+            "jira_breakdown.txt",
+            "text/plain"
+        )
+
+        # Excel Download
+        jira_df = pd.DataFrame({"Jira Breakdown": [jira_output]})
+
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            jira_df.to_excel(writer, sheet_name="Jira_Output", index=False)
+
+        col2.download_button(
+            "Download as Excel",
+            output.getvalue(),
+            "jira_breakdown.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
 # ===================================
-# ========== HISTORY PANEL =========
+# HISTORY PANEL
 # ===================================
 
 st.markdown("---")
