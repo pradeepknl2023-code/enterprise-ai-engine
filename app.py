@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
-from huggingface_hub import InferenceClient
+from groq import Groq
 import re
 
 # ==========================================================
@@ -13,7 +13,7 @@ st.set_page_config(
 )
 
 # ==========================================================
-# HEADER STYLE
+# HEADER
 # ==========================================================
 st.markdown("""
 <style>
@@ -36,22 +36,17 @@ st.markdown("""
 
 st.markdown("""
 <div class="header">
-<h1>Enterprise AI ETL Engine (Free AI Mode)</h1>
+<h1>Enterprise AI ETL Engine (AI Powered)</h1>
 </div>
 """, unsafe_allow_html=True)
 
 st.divider()
 
 # ==========================================================
-# HUGGINGFACE CLIENT (STABLE FREE MODEL)
+# GROQ CLIENT
 # ==========================================================
-
-HF_TOKEN = st.secrets["HF_TOKEN"]
-
-client = InferenceClient(
-    model="HuggingFaceH4/zephyr-7b-beta",
-    token=HF_TOKEN
-)
+GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
+client = Groq(api_key=GROQ_API_KEY)
 
 # ==========================================================
 # LLM → PANDAS CODE GENERATOR
@@ -71,16 +66,16 @@ STRICT RULES:
 - Do NOT import anything.
 - Do NOT redefine df.
 - Modify df directly.
-- Final output must remain stored in df.
+- Final result must remain in df.
 """
 
-    response = client.chat_completion(
+    response = client.chat.completions.create(
+        model="llama3-8b-8192",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
-        max_tokens=400,
-        temperature=0.1
+        temperature=0.1,
     )
 
     content = response.choices[0].message.content
@@ -97,7 +92,7 @@ STRICT RULES:
 def execute_code(df, code):
 
     # Block dangerous patterns
-    forbidden = ["import", "__", "os.", "sys.", "eval", "exec", "open(", "subprocess"]
+    forbidden = ["import", "__", "os.", "sys.", "eval", "exec(", "open(", "subprocess"]
     for word in forbidden:
         if word in code:
             raise Exception("Unsafe code detected.")
@@ -112,8 +107,8 @@ def execute_code(df, code):
 # ==========================================================
 # UI
 # ==========================================================
-
 uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
+
 prompt = st.text_area(
     "Describe your transformation",
     placeholder="Example: remove records where Email starts with pradeep"
@@ -129,7 +124,7 @@ if st.button("Run AI Transformation"):
         st.subheader("Original Data")
         st.dataframe(df.head())
 
-        with st.spinner("AI generating Pandas transformation..."):
+        with st.spinner("Generating AI transformation logic..."):
             try:
                 code = generate_pandas_code(df.columns.tolist(), prompt)
             except Exception as e:
