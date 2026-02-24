@@ -1,205 +1,178 @@
 import streamlit as st
-from huggingface_hub import InferenceClient
 import pandas as pd
-import os
-import io
-import json
+import re
+from io import BytesIO
 
-# =====================================================
+# ==========================================================
 # PAGE CONFIG
-# =====================================================
-st.set_page_config(page_title="ReqIntel AI", layout="wide")
+# ==========================================================
+st.set_page_config(
+    page_title="ReqIntelligence AI Platform",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
 
-# =====================================================
-# HEADER
-# =====================================================
+# ==========================================================
+# FULL WIDTH HEADER STYLE (Professional)
+# ==========================================================
 st.markdown("""
 <style>
-.page-header {
-    width:100%;
-    background-color:#E41B17;
-    color:#FFD700;
-    padding:25px;
-    font-size:28px;
-    font-weight:700;
+.main-header {
+    background-color: #b31b1b;
+    padding: 18px;
+    border-radius: 0px;
+    text-align: center;
 }
-.sub-header {
-    font-size:14px;
-    margin-bottom:20px;
+.main-header h1 {
+    color: #ffcc00;
+    font-size: 28px;
+    margin: 0;
+}
+.sub-text {
+    text-align: center;
+    font-size: 15px;
+    color: grey;
+    margin-top: 8px;
+}
+.stDownloadButton button {
+    background-color: #b31b1b;
+    color: white;
 }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="page-header">ReqIntel AI – Hybrid ETL Platform</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">AI Rule Extraction + Deterministic Pandas Transformation Engine</div>', unsafe_allow_html=True)
+st.markdown("""
+<div class="main-header">
+    <h1>ReqIntelligence AI Platform</h1>
+</div>
+""", unsafe_allow_html=True)
 
-# =====================================================
-# HUGGING FACE SETUP
-# =====================================================
-HF_TOKEN = os.getenv("HF_TOKEN")
+st.markdown('<div class="sub-text">Hybrid AI + Pandas ETL Automation Engine</div>', unsafe_allow_html=True)
 
-if not HF_TOKEN:
-    st.error("HF_TOKEN missing. Add it in Streamlit Cloud → Settings → Secrets.")
-    st.stop()
+st.divider()
 
-client = InferenceClient(token=HF_TOKEN)
+# ==========================================================
+# HELPER FUNCTIONS
+# ==========================================================
 
-# =====================================================
-# INPUT SECTION
-# =====================================================
-st.markdown("### Business Transformation Description")
-business_logic = st.text_area("Describe transformation rules (e.g., flag high amounts above 10000)", height=150)
+def normalize_columns(df):
+    df.columns = [col.strip() for col in df.columns]
+    return df
+
+
+def find_column(df, text):
+    for col in df.columns:
+        if col.lower() in text.lower():
+            return col
+    return None
+
+
+def apply_etl_rules(df, description):
+    df = normalize_columns(df)
+    desc = description.lower()
+
+    # REMOVE STARTS WITH
+    if "remove" in desc and "starts" in desc:
+        column = find_column(df, desc)
+        match = re.search(r"starts\s+(with|as)\s+([\w@.]+)", desc)
+
+        if column and match:
+            value = match.group(2)
+            df = df[~df[column].astype(str).str.lower().str.startswith(value.lower())]
+            return df, f"Removed rows where {column} starts with '{value}'"
+
+    # REMOVE EQUALS
+    if "remove" in desc and "equals" in desc:
+        column = find_column(df, desc)
+        match = re.search(r"equals\s+([\w@.]+)", desc)
+
+        if column and match:
+            value = match.group(1)
+            df = df[df[column].astype(str).str.lower() != value.lower()]
+            return df, f"Removed rows where {column} equals '{value}'"
+
+    # REMOVE CONTAINS
+    if "remove" in desc and "contains" in desc:
+        column = find_column(df, desc)
+        match = re.search(r"contains\s+([\w@.]+)", desc)
+
+        if column and match:
+            value = match.group(1)
+            df = df[~df[column].astype(str).str.lower().str.contains(value.lower())]
+            return df, f"Removed rows where {column} contains '{value}'"
+
+    # GREATER THAN
+    if "greater than" in desc:
+        column = find_column(df, desc)
+        match = re.search(r"greater than\s+(\d+)", desc)
+
+        if column and match:
+            value = float(match.group(1))
+            df = df[pd.to_numeric(df[column], errors='coerce') > value]
+            return df, f"Filtered rows where {column} > {value}"
+
+    # LESS THAN
+    if "less than" in desc:
+        column = find_column(df, desc)
+        match = re.search(r"less than\s+(\d+)", desc)
+
+        if column and match:
+            value = float(match.group(1))
+            df = df[pd.to_numeric(df[column], errors='coerce') < value]
+            return df, f"Filtered rows where {column} < {value}"
+
+    return df, "No matching rule found. Try clearer instruction."
+
+
+def convert_df_to_csv(df):
+    buffer = BytesIO()
+    df.to_csv(buffer, index=False)
+    return buffer.getvalue()
+
+
+# ==========================================================
+# UI SECTION
+# ==========================================================
+
+st.subheader("Upload Dataset")
 
 uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
 
-# =====================================================
-# DATA PROFILING
-# =====================================================
-def profile_dataframe(df):
-    profile = {
-        "columns": list(df.columns),
-        "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
-        "row_count": len(df)
-    }
-    return profile
+st.subheader("Business Transformation Rule")
 
-# =====================================================
-# DETERMINISTIC CLEANING
-# =====================================================
-def deterministic_cleaning(df):
-    audit = []
+business_description = st.text_area(
+    "Describe transformation in plain English",
+    placeholder="Example: remove records where Email starts with pradeep"
+)
 
-    before = len(df)
-    df = df.drop_duplicates()
-    audit.append(f"Removed {before - len(df)} duplicate rows")
+st.divider()
 
-    # Normalize string columns
-    for col in df.select_dtypes(include=["object"]).columns:
-        df[col] = df[col].astype(str).str.strip()
+# ==========================================================
+# PROCESSING
+# ==========================================================
 
-    # Normalize date columns automatically
-    for col in df.columns:
-        if "date" in col.lower():
-            df[col] = pd.to_datetime(df[col], errors="coerce").dt.strftime("%Y-%m-%d")
-            audit.append(f"Standardized date format for {col}")
-
-    return df, audit
-
-# =====================================================
-# AI RULE EXTRACTION (STRUCTURED JSON)
-# =====================================================
-def ai_extract_rules(description, columns):
-
-    prompt = f"""
-You are a Senior Data Architect.
-
-Given dataset columns:
-{columns}
-
-Extract transformation rules from this description:
-
-{description}
-
-Return ONLY valid JSON:
-
-{{
-  "amount_column": "column name if applicable or null",
-  "risk_threshold": number or null,
-  "high_label": "string",
-  "normal_label": "string"
-}}
-
-Do not include explanation. JSON only.
-"""
-
-    try:
-        response = client.chat.completions.create(
-            model="Qwen/Qwen2.5-7B-Instruct",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=400,
-            temperature=0.2
-        )
-
-        content = response.choices[0].message.content
-        return json.loads(content)
-
-    except:
-        return None
-
-# =====================================================
-# APPLY AI RULES DETERMINISTICALLY
-# =====================================================
-def apply_ai_rules(df, rules, audit):
-
-    if not rules:
-        audit.append("No AI rules extracted")
-        return df, audit
-
-    amount_col = rules.get("amount_column")
-    threshold = rules.get("risk_threshold")
-
-    if amount_col and threshold and amount_col in df.columns:
-
-        high_label = rules.get("high_label", "HIGH")
-        normal_label = rules.get("normal_label", "NORMAL")
-
-        df["Risk_Flag"] = df[amount_col].apply(
-            lambda x: high_label if pd.to_numeric(x, errors="coerce") > threshold else normal_label
-        )
-
-        audit.append(f"Risk_Flag created using {amount_col} > {threshold}")
-
-    else:
-        audit.append("Risk rule not applied (missing column or threshold)")
-
-    return df, audit
-
-# =====================================================
-# MAIN PIPELINE
-# =====================================================
-if st.button("🚀 Run Hybrid AI + Pandas ETL"):
-
-    if not uploaded_file:
-        st.warning("Please upload a CSV file.")
-        st.stop()
+if uploaded_file and business_description:
 
     df = pd.read_csv(uploaded_file)
 
-    st.subheader("Original Data Preview")
+    st.subheader("Original Data")
     st.dataframe(df.head())
 
-    # Profile dataset
-    profile = profile_dataframe(df)
+    updated_df, message = apply_etl_rules(df, business_description)
 
-    st.subheader("Dataset Profile")
-    st.json(profile)
+    st.success(message)
 
-    # Deterministic Cleaning
-    df_cleaned, audit_log = deterministic_cleaning(df)
+    st.subheader("Processed Data")
+    st.dataframe(updated_df)
 
-    # AI Rule Extraction
-    rules = ai_extract_rules(business_logic, profile["columns"]) if business_logic else None
-
-    # Apply AI Rules Deterministically
-    df_final, audit_log = apply_ai_rules(df_cleaned, rules, audit_log)
-
-    st.subheader("Final Transformed Data")
-    st.dataframe(df_final)
-
-    # CSV Download (Guaranteed Clean Format)
-    buffer = io.StringIO()
-    df_final.to_csv(buffer, index=False)
+    csv_data = convert_df_to_csv(updated_df)
 
     st.download_button(
-        label="Download Cleaned CSV",
-        data=buffer.getvalue(),
-        file_name="cleaned_output.csv",
+        label="Download Processed CSV",
+        data=csv_data,
+        file_name="processed_output.csv",
         mime="text/csv"
     )
 
-    st.subheader("Audit Log")
-    for entry in audit_log:
-        st.write("•", entry)
-
-    st.subheader("AI Extracted Rules")
-    st.json(rules if rules else {"message": "No structured rules extracted"})
+else:
+    st.info("Upload CSV and enter transformation rule to begin.")
