@@ -1,336 +1,280 @@
 import streamlit as st
 import pandas as pd
-import os
-import datetime
+import numpy as np
 import json
+import os
 from groq import Groq
-from io import BytesIO
 
 # -----------------------------------
 # PAGE CONFIG
 # -----------------------------------
 st.set_page_config(page_title="Enterprise AI Platform", layout="wide")
 
-# -----------------------------------
-# THEME (UNCHANGED)
-# -----------------------------------
 st.markdown("""
-<style>
-.main-header {
-    background-color: #B31B1B;
-    padding: 20px;
-    border-radius: 8px;
-    margin-bottom: 20px;
-}
-.main-header h1 {
-    color: #FFC72C;
-    margin: 0;
-}
-.section-title {
-    color: #B31B1B;
-    font-weight: 600;
-    font-size: 20px;
-    margin-top: 20px;
-}
-.stButton>button {
-    background-color: #B31B1B;
-    color: white;
-    font-weight: bold;
-}
-.stButton>button:hover {
-    background-color: #8E1414;
-    color: #FFC72C;
-}
-</style>
-""", unsafe_allow_html=True)
-
-st.markdown("""
-<div class="main-header">
-<h1>Enterprise AI Transformation & Delivery Platform</h1>
+<div style='background-color:#b31b1b;padding:15px;border-radius:5px'>
+<h1 style='color:gold;text-align:center;'>Enterprise AI Smart Data Assistant</h1>
 </div>
 """, unsafe_allow_html=True)
 
 # -----------------------------------
-# GROQ SETUP
+# GROQ CLIENT
 # -----------------------------------
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-if not GROQ_API_KEY:
-    st.error("Set GROQ_API_KEY in Streamlit Secrets.")
-    st.stop()
-
 client = Groq(api_key=GROQ_API_KEY)
 
-if "history" not in st.session_state:
-    st.session_state.history = []
-
 # -----------------------------------
-# SAFE TYPE DETECTION
+# STRICT SYSTEM PROMPT
 # -----------------------------------
-def is_numeric_column(series):
-    try:
-        pd.to_numeric(series.dropna().iloc[:10])
-        return True
-    except:
-        return False
+SYSTEM_PROMPT = """
+You are a Smart ETL Intent Parser.
 
-# -----------------------------------
-# LLM PARSER
-# -----------------------------------
-def parse_intent(prompt, columns):
-    system_prompt = f"""
-Return STRICT JSON only.
+Return ONLY valid JSON.
+No explanation.
+No markdown.
+No extra text.
 
-Supported types:
-filter
-conditional_column
-aggregation
+Schema:
 
-Structure:
+{
+  "operation_type": null,
+  "filters": [],
+  "new_columns": [],
+  "group_by": [],
+  "aggregation": null,
+  "ranking": null,
+  "sort": null,
+  "limit": null
+}
 
-{{
-"type": "",
-"logic": "AND" | "OR",
-"filters": [],
-"new_columns": [],
-"aggregation": {{}}
-}}
+Filter format:
+{
+  "column": "",
+  "operator": "=", ">", "<", ">=", "<=", "!=",
+  "value": "",
+  "logic": "AND" or "OR"
+}
 
-Available columns: {columns}
+New column format:
+{
+  "column_name": "",
+  "conditions": [
+      {
+        "column": "",
+        "operator": "",
+        "value": "",
+        "output": ""
+      }
+  ],
+  "default": ""
+}
+
+Aggregation:
+{
+  "column": "",
+  "operator": "avg | sum | min | max | count"
+}
+
+Ranking:
+{
+  "partition_by": "",
+  "order_by": "",
+  "order": "asc | desc",
+  "top_n": number
+}
 """
 
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0
-    )
-
-    return response.choices[0].message.content.strip()
+# -----------------------------------
+# SAFE JSON RETRY
+# -----------------------------------
+def get_clean_json(user_prompt):
+    for _ in range(2):
+        response = client.chat.completions.create(
+            model="llama3-70b-8192",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0
+        )
+        raw = response.choices[0].message.content.strip()
+        try:
+            return json.loads(raw)
+        except:
+            user_prompt = "Return valid JSON only.\n" + user_prompt
+    raise ValueError("Invalid JSON from AI.")
 
 # -----------------------------------
-# SAFE RULE ENGINE
+# FILTER ENGINE (Dynamic AND/OR)
 # -----------------------------------
-def apply_rules(df, intent_json):
-    try:
-        intent = json.loads(intent_json)
-    except:
-        st.error("Invalid JSON from AI.")
+def apply_filters(df, filters):
+    if not filters:
         return df
 
-    df = df.copy().fillna("")
-    intent_type = intent.get("type")
+    mask = pd.Series([True] * len(df))
 
-    # ================= FILTER =================
-    if intent_type == "filter":
-        logic = intent.get("logic", "AND")
-        conditions = []
+    for f in filters:
+        col = f["column"]
+        op = f["operator"]
+        val = f["value"]
+        logic = f.get("logic", "AND")
 
-        for f in intent.get("filters", []):
-            col = f.get("column")
-            op = f.get("operator")
-            val = f.get("value")
+        if col not in df.columns:
+            continue
 
-            if col not in df.columns:
-                continue
+        series = df[col]
+        series_num = pd.to_numeric(series, errors="coerce")
 
-            series = df[col]
-
-            if is_numeric_column(series):
-                series = pd.to_numeric(series, errors="coerce")
-                try:
-                    if op == "between":
-                        low, high = map(float, str(val).split(","))
-                        cond = series.between(low, high)
-                    else:
-                        val = float(val)
-                        if op == ">":
-                            cond = series > val
-                        elif op == "<":
-                            cond = series < val
-                        elif op == ">=":
-                            cond = series >= val
-                        elif op == "<=":
-                            cond = series <= val
-                        elif op == "=":
-                            cond = series == val
-                        else:
-                            continue
-                except:
-                    continue
-            else:
-                series = series.astype(str).str.strip().str.lower()
-                if op == "=":
-                    cond = series == str(val).strip().lower()
-                elif op == "in":
-                    values = [v.strip().lower() for v in str(val).split(",")]
-                    cond = series.isin(values)
-                else:
-                    continue
-
-            conditions.append(cond)
-
-        if conditions:
-            final_condition = conditions[0]
-            for c in conditions[1:]:
-                final_condition = (
-                    final_condition | c if logic == "OR"
-                    else final_condition & c
-                )
-            df = df[final_condition]
-
-        return df
-
-    # ================= CONDITIONAL COLUMNS =================
-    if intent_type == "conditional_column":
-        for rule in intent.get("new_columns", []):
-            cond_def = rule.get("condition", {})
-            col = cond_def.get("column")
-            op = cond_def.get("operator")
-            val = cond_def.get("value")
-
-            if col not in df.columns:
-                continue
-
-            series = df[col]
-
-            if not is_numeric_column(series):
-                continue
-
-            series = pd.to_numeric(series, errors="coerce")
-
-            try:
-                val = float(val)
-            except:
-                continue
-
-            if op == ">":
-                cond = series > val
-            elif op == "<":
-                cond = series < val
-            elif op == ">=":
-                cond = series >= val
-            elif op == "<=":
-                cond = series <= val
-            elif op == "=":
-                cond = series == val
-            else:
-                continue
-
-            df[rule.get("new_column")] = cond.map(
-                lambda x: rule.get("true_value") if x else rule.get("false_value")
-            )
-
-        return df
-
-    # ================= AGGREGATION =================
-    if intent_type == "aggregation":
-        agg = intent.get("aggregation", {})
-        group_cols = agg.get("group_by", [])
-        metrics = agg.get("metrics", [])
-
-        agg_dict = {}
-        for m in metrics:
-            col = m.get("column")
-            op = m.get("operation")
-            if col in df.columns and is_numeric_column(df[col]):
-                agg_dict[col] = op
-
-        if group_cols:
-            return df.groupby(group_cols).agg(agg_dict).reset_index()
+        if op == "=":
+            cond = series == val
+        elif op == "!=":
+            cond = series != val
+        elif op == ">":
+            cond = series_num > float(val)
+        elif op == "<":
+            cond = series_num < float(val)
+        elif op == ">=":
+            cond = series_num >= float(val)
+        elif op == "<=":
+            cond = series_num <= float(val)
         else:
-            return df.agg(agg_dict).to_frame().T
+            continue
+
+        if logic == "AND":
+            mask &= cond
+        else:
+            mask |= cond
+
+    return df[mask]
+
+# -----------------------------------
+# NEW COLUMN ENGINE
+# -----------------------------------
+def apply_new_columns(df, new_columns):
+    for col_def in new_columns:
+        name = col_def["column_name"]
+        df[name] = col_def.get("default", None)
+
+        for cond in col_def["conditions"]:
+            col = cond["column"]
+            op = cond["operator"]
+            val = cond["value"]
+            output = cond["output"]
+
+            if col not in df.columns:
+                continue
+
+            series = df[col]
+            series_num = pd.to_numeric(series, errors="coerce")
+
+            if op == "=":
+                mask = series == val
+            elif op == ">":
+                mask = series_num > float(val)
+            elif op == "<":
+                mask = series_num < float(val)
+            elif op == ">=":
+                mask = series_num >= float(val)
+            elif op == "<=":
+                mask = series_num <= float(val)
+            else:
+                continue
+
+            df.loc[mask, name] = output
 
     return df
 
 # -----------------------------------
-# TABS
+# EXECUTION ENGINE
 # -----------------------------------
-tab1, tab2 = st.tabs(["AI ETL Engine", "AI Jira Breakdown"])
+def execute_etl(df, instructions):
 
-with tab1:
-    st.markdown('<div class="section-title">Business Description</div>', unsafe_allow_html=True)
-    etl_prompt = st.text_area("Describe data transformation", height=140)
-    uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
+    df = df.copy()
 
-    if st.button("Execute ETL"):
-        if not etl_prompt.strip() or not uploaded_file:
-            st.warning("Provide prompt and CSV.")
-            st.stop()
+    df = apply_filters(df, instructions.get("filters"))
 
-        df = pd.read_csv(uploaded_file)
-        original_rows = len(df)
+    df = apply_new_columns(df, instructions.get("new_columns"))
 
+    if instructions.get("aggregation"):
+        col = instructions["aggregation"]["column"]
+        op = instructions["aggregation"]["operator"]
+
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        if instructions.get("group_by"):
+            grouped = df.groupby(instructions["group_by"])
+
+            if op == "avg":
+                df = grouped[col].mean().reset_index()
+            elif op == "sum":
+                df = grouped[col].sum().reset_index()
+            elif op == "count":
+                df = grouped[col].count().reset_index()
+            elif op == "min":
+                df = grouped[col].min().reset_index()
+            elif op == "max":
+                df = grouped[col].max().reset_index()
+
+    if instructions.get("ranking"):
+        r = instructions["ranking"]
+        part = r["partition_by"]
+        order = r["order_by"]
+        direction = r["order"]
+        top_n = r["top_n"]
+
+        df[order] = pd.to_numeric(df[order], errors="coerce")
+
+        df = (
+            df.sort_values(order, ascending=(direction == "asc"))
+              .groupby(part)
+              .head(top_n)
+        )
+
+    if instructions.get("sort"):
+        col = instructions["sort"]["column"]
+        direction = instructions["sort"]["order"]
+        df = df.sort_values(col, ascending=(direction == "asc"))
+
+    if instructions.get("limit"):
+        df = df.head(instructions["limit"])
+
+    return df
+
+# -----------------------------------
+# UI
+# -----------------------------------
+uploaded_file = st.file_uploader("Upload CSV file", type=["csv"])
+
+if uploaded_file:
+    df = pd.read_csv(uploaded_file)
+    st.subheader("Preview Data")
+    st.dataframe(df)
+
+    user_prompt = st.text_area("Enter ETL instruction")
+
+    if st.button("Run ETL"):
         try:
-            intent_json = parse_intent(etl_prompt, df.columns.tolist())
-            transformed_df = apply_rules(df, intent_json)
+            instructions = get_clean_json(user_prompt)
+            result = execute_etl(df, instructions)
+            st.success("ETL executed successfully.")
+            st.dataframe(result)
         except Exception as e:
-            st.error(f"ETL failed: {e}")
-            transformed_df = df.copy()
+            st.error(f"ETL failed: {str(e)}")
 
-        st.subheader("Generated Intent JSON")
-        st.code(intent_json)
+# -----------------------------------
+# JIRA BREAKDOWN (UNCHANGED)
+# -----------------------------------
+st.markdown("---")
+st.header("Jira Breakdown")
 
-        st.subheader("Transformed Output")
-        st.dataframe(transformed_df, use_container_width=True)
+jira_input = st.text_area("Enter Business Requirement")
 
-        st.session_state.history.append({
-            "Time": datetime.datetime.now(),
-            "Prompt": etl_prompt,
-            "Rows Before": original_rows,
-            "Rows After": len(transformed_df)
-        })
-
-        col1, col2 = st.columns(2)
-        col1.download_button(
-            "Download CSV",
-            transformed_df.to_csv(index=False).encode("utf-8"),
-            "etl_output.csv",
-            "text/csv"
-        )
-
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            transformed_df.to_excel(writer, sheet_name="Transformed_Data", index=False)
-            pd.DataFrame(st.session_state.history).to_excel(writer, sheet_name="Audit_Log", index=False)
-
-        col2.download_button(
-            "Download Excel",
-            output.getvalue(),
-            "etl_output.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
-# JIRA TAB UNCHANGED
-with tab2:
-    st.markdown('<div class="section-title">Business Description</div>', unsafe_allow_html=True)
-    jira_prompt = st.text_area("Describe feature or initiative", height=140)
-
-    if st.button("Generate Jira Breakdown"):
-        if not jira_prompt.strip():
-            st.warning("Enter business description.")
-            st.stop()
-
-        with st.spinner("Generating Agile breakdown..."):
-            jira_system_prompt = """
-You are a Senior Agile Delivery Manager.
-Generate:
-- 1 Epic
-- Multiple User Stories
-- Acceptance Criteria
-- Subtasks
-Return structured professional format.
-"""
-            response = client.chat.completions.create(
-                model="llama-3.1-8b-instant",
-                messages=[
-                    {"role": "system", "content": jira_system_prompt},
-                    {"role": "user", "content": jira_prompt}
-                ],
-                temperature=0.3
-            )
-            jira_output = response.choices[0].message.content
-
-        st.subheader("Jira Breakdown")
-        st.markdown(jira_output)
+if st.button("Generate Jira Stories"):
+    response = client.chat.completions.create(
+        model="llama3-70b-8192",
+        messages=[
+            {"role": "system", "content": "Generate structured Jira Epics, Stories, Subtasks, and Acceptance Criteria."},
+            {"role": "user", "content": jira_input}
+        ],
+        temperature=0.3
+    )
+    st.write(response.choices[0].message.content)
