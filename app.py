@@ -12,7 +12,7 @@ from io import BytesIO
 st.set_page_config(page_title="Enterprise AI Platform", layout="wide")
 
 # -----------------------------------
-# ENTERPRISE THEME (UNCHANGED)
+# THEME (UNCHANGED)
 # -----------------------------------
 st.markdown("""
 <style>
@@ -60,53 +60,39 @@ if not GROQ_API_KEY:
 
 client = Groq(api_key=GROQ_API_KEY)
 
-# -----------------------------------
-# SESSION STATE
-# -----------------------------------
 if "history" not in st.session_state:
     st.session_state.history = []
 
 # -----------------------------------
-# LLM INTENT PARSER (STRICT JSON)
+# SAFE TYPE DETECTION
+# -----------------------------------
+def is_numeric_column(series):
+    try:
+        pd.to_numeric(series.dropna().iloc[:10])
+        return True
+    except:
+        return False
+
+# -----------------------------------
+# LLM PARSER
 # -----------------------------------
 def parse_intent(prompt, columns):
     system_prompt = f"""
-You are an Enterprise Data Transformation Parser.
-
 Return STRICT JSON only.
-No markdown. No explanation.
 
-Supported:
+Supported types:
 filter
 conditional_column
 aggregation
 
-JSON STRUCTURE:
+Structure:
 
 {{
 "type": "",
 "logic": "AND" | "OR",
-"filters": [
-  {{
-    "column": "",
-    "operator": ">" | "<" | ">=" | "<=" | "=" | "between" | "in",
-    "value": ""
-  }}
-],
-"new_columns": [
-  {{
-    "new_column": "",
-    "condition": {{"column": "", "operator": "", "value": ""}},
-    "true_value": "",
-    "false_value": ""
-  }}
-],
-"aggregation": {{
-  "group_by": [],
-  "metrics": [
-     {{"column": "", "operation": "avg" | "sum" | "count"}}
-  ]
-}}
+"filters": [],
+"new_columns": [],
+"aggregation": {{}}
 }}
 
 Available columns: {columns}
@@ -133,12 +119,10 @@ def apply_rules(df, intent_json):
         st.error("Invalid JSON from AI.")
         return df
 
-    df = df.copy()
-    df = df.fillna("")
-
+    df = df.copy().fillna("")
     intent_type = intent.get("type")
 
-    # ---------------- FILTER ----------------
+    # ================= FILTER =================
     if intent_type == "filter":
         logic = intent.get("logic", "AND")
         conditions = []
@@ -153,30 +137,34 @@ def apply_rules(df, intent_json):
 
             series = df[col]
 
-            if pd.api.types.is_numeric_dtype(series):
+            if is_numeric_column(series):
                 series = pd.to_numeric(series, errors="coerce")
-
-                if op == ">":
-                    cond = series > float(val)
-                elif op == "<":
-                    cond = series < float(val)
-                elif op == ">=":
-                    cond = series >= float(val)
-                elif op == "<=":
-                    cond = series <= float(val)
-                elif op == "=":
-                    cond = series == float(val)
-                elif op == "between":
-                    low, high = map(float, val.split(","))
-                    cond = series.between(low, high)
-                else:
+                try:
+                    if op == "between":
+                        low, high = map(float, str(val).split(","))
+                        cond = series.between(low, high)
+                    else:
+                        val = float(val)
+                        if op == ">":
+                            cond = series > val
+                        elif op == "<":
+                            cond = series < val
+                        elif op == ">=":
+                            cond = series >= val
+                        elif op == "<=":
+                            cond = series <= val
+                        elif op == "=":
+                            cond = series == val
+                        else:
+                            continue
+                except:
                     continue
             else:
                 series = series.astype(str).str.strip().str.lower()
                 if op == "=":
-                    cond = series == str(val).lower()
+                    cond = series == str(val).strip().lower()
                 elif op == "in":
-                    values = [v.strip().lower() for v in val.split(",")]
+                    values = [v.strip().lower() for v in str(val).split(",")]
                     cond = series.isin(values)
                 else:
                     continue
@@ -184,51 +172,59 @@ def apply_rules(df, intent_json):
             conditions.append(cond)
 
         if conditions:
-            if logic == "OR":
-                final_condition = conditions[0]
-                for c in conditions[1:]:
-                    final_condition = final_condition | c
-            else:
-                final_condition = conditions[0]
-                for c in conditions[1:]:
-                    final_condition = final_condition & c
-
+            final_condition = conditions[0]
+            for c in conditions[1:]:
+                final_condition = (
+                    final_condition | c if logic == "OR"
+                    else final_condition & c
+                )
             df = df[final_condition]
 
         return df
 
-    # ---------------- CONDITIONAL COLUMNS ----------------
+    # ================= CONDITIONAL COLUMNS =================
     if intent_type == "conditional_column":
         for rule in intent.get("new_columns", []):
-            col = rule["condition"]["column"]
-            op = rule["condition"]["operator"]
-            val = rule["condition"]["value"]
+            cond_def = rule.get("condition", {})
+            col = cond_def.get("column")
+            op = cond_def.get("operator")
+            val = cond_def.get("value")
 
             if col not in df.columns:
                 continue
 
-            series = pd.to_numeric(df[col], errors="coerce")
+            series = df[col]
+
+            if not is_numeric_column(series):
+                continue
+
+            series = pd.to_numeric(series, errors="coerce")
+
+            try:
+                val = float(val)
+            except:
+                continue
 
             if op == ">":
-                cond = series > float(val)
+                cond = series > val
             elif op == "<":
-                cond = series < float(val)
+                cond = series < val
             elif op == ">=":
-                cond = series >= float(val)
+                cond = series >= val
             elif op == "<=":
-                cond = series <= float(val)
+                cond = series <= val
             elif op == "=":
-                cond = series == float(val)
+                cond = series == val
             else:
                 continue
 
-            df[rule["new_column"]] = cond.map(
-                lambda x: rule["true_value"] if x else rule["false_value"]
+            df[rule.get("new_column")] = cond.map(
+                lambda x: rule.get("true_value") if x else rule.get("false_value")
             )
 
         return df
 
-    # ---------------- AGGREGATION ----------------
+    # ================= AGGREGATION =================
     if intent_type == "aggregation":
         agg = intent.get("aggregation", {})
         group_cols = agg.get("group_by", [])
@@ -236,9 +232,9 @@ def apply_rules(df, intent_json):
 
         agg_dict = {}
         for m in metrics:
-            col = m["column"]
-            op = m["operation"]
-            if col in df.columns:
+            col = m.get("column")
+            op = m.get("operation")
+            if col in df.columns and is_numeric_column(df[col]):
                 agg_dict[col] = op
 
         if group_cols:
@@ -253,20 +249,14 @@ def apply_rules(df, intent_json):
 # -----------------------------------
 tab1, tab2 = st.tabs(["AI ETL Engine", "AI Jira Breakdown"])
 
-# ===================================
-# ========== AI ETL TAB =============
-# ===================================
 with tab1:
     st.markdown('<div class="section-title">Business Description</div>', unsafe_allow_html=True)
     etl_prompt = st.text_area("Describe data transformation", height=140)
     uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
 
     if st.button("Execute ETL"):
-        if not etl_prompt.strip():
-            st.warning("Enter transformation description.")
-            st.stop()
-        if not uploaded_file:
-            st.warning("Upload CSV file.")
+        if not etl_prompt.strip() or not uploaded_file:
+            st.warning("Provide prompt and CSV.")
             st.stop()
 
         df = pd.read_csv(uploaded_file)
@@ -292,12 +282,13 @@ with tab1:
             "Rows After": len(transformed_df)
         })
 
-        # Export
-        st.markdown('<div class="section-title">Export Results</div>', unsafe_allow_html=True)
         col1, col2 = st.columns(2)
-
-        csv_data = transformed_df.to_csv(index=False).encode("utf-8")
-        col1.download_button("Download CSV", csv_data, "etl_output.csv", "text/csv")
+        col1.download_button(
+            "Download CSV",
+            transformed_df.to_csv(index=False).encode("utf-8"),
+            "etl_output.csv",
+            "text/csv"
+        )
 
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
@@ -311,9 +302,7 @@ with tab1:
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-# ===================================
-# ========== JIRA TAB (UNCHANGED) ===
-# ===================================
+# JIRA TAB UNCHANGED
 with tab2:
     st.markdown('<div class="section-title">Business Description</div>', unsafe_allow_html=True)
     jira_prompt = st.text_area("Describe feature or initiative", height=140)
@@ -345,31 +334,3 @@ Return structured professional format.
 
         st.subheader("Jira Breakdown")
         st.markdown(jira_output)
-
-        st.markdown('<div class="section-title">Export Jira Output</div>', unsafe_allow_html=True)
-        col1, col2 = st.columns(2)
-
-        col1.download_button("Download as TXT", jira_output, "jira_breakdown.txt", "text/plain")
-
-        jira_df = pd.DataFrame({"Jira Breakdown": [jira_output]})
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            jira_df.to_excel(writer, sheet_name="Jira_Output", index=False)
-
-        col2.download_button(
-            "Download as Excel",
-            output.getvalue(),
-            "jira_breakdown.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
-# -----------------------------------
-# HISTORY PANEL
-# -----------------------------------
-st.markdown("---")
-st.markdown('<div class="section-title">Transformation History</div>', unsafe_allow_html=True)
-
-if st.session_state.history:
-    st.dataframe(pd.DataFrame(st.session_state.history))
-else:
-    st.info("No transformations executed yet.")
