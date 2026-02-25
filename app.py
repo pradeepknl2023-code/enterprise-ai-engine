@@ -5,7 +5,6 @@ import datetime
 import json
 import re
 from groq import Groq
-from io import BytesIO
 
 # -----------------------------------
 # PAGE CONFIG
@@ -71,17 +70,42 @@ if "history" not in st.session_state:
 # SAFE JSON EXTRACTOR
 # -----------------------------------
 def extract_json(text):
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        return None
-    json_str = match.group(0)
-    json_str = json_str.replace("'", '"')
-    json_str = re.sub(r",\s*}", "}", json_str)
-    json_str = re.sub(r",\s*]", "]", json_str)
     try:
-        return json.loads(json_str)
+        match = re.search(r"\{[\s\S]*\}", text)
+        if not match:
+            return None
+        return json.loads(match.group(0))
     except:
         return None
+
+# -----------------------------------
+# VALIDATOR
+# -----------------------------------
+def validate_instructions(instructions):
+    if not isinstance(instructions, dict):
+        return False, "Instructions must be JSON object."
+
+    if "filter" in instructions:
+        if not isinstance(instructions["filter"], dict):
+            return False, "Invalid filter structure."
+
+    if "aggregation" in instructions:
+        agg = instructions["aggregation"]
+        if not isinstance(agg, dict):
+            return False, "Aggregation must be object."
+        if "group_by" not in agg or "column" not in agg:
+            return False, "Aggregation missing required fields."
+
+    return True, None
+
+# -----------------------------------
+# COLUMN MATCHER
+# -----------------------------------
+def match_column(df, name):
+    for col in df.columns:
+        if col.lower() == str(name).lower():
+            return col
+    return None
 
 # -----------------------------------
 # CONDITION ENGINE
@@ -89,24 +113,27 @@ def extract_json(text):
 def apply_conditions(df, condition):
 
     if "logic" in condition:
-        logic = condition["logic"]
-        masks = [apply_conditions(df, c) for c in condition["conditions"]]
-        if logic == "AND":
-            mask = masks[0]
-            for m in masks[1:]:
-                mask &= m
-            return mask
-        if logic == "OR":
-            mask = masks[0]
-            for m in masks[1:]:
-                mask |= m
-            return mask
+        logic = condition.get("logic", "AND").upper()
+        conditions = condition.get("conditions", [])
+        if not conditions:
+            return pd.Series([True] * len(df))
 
-    col = condition.get("column")
+        masks = [apply_conditions(df, c) for c in conditions]
+        mask = masks[0]
+
+        for m in masks[1:]:
+            if logic == "AND":
+                mask &= m
+            elif logic == "OR":
+                mask |= m
+
+        return mask
+
+    col = match_column(df, condition.get("column"))
     op = condition.get("operator")
     val = condition.get("value")
 
-    if col not in df.columns:
+    if not col or not op:
         return pd.Series([True] * len(df))
 
     if op == "is_null":
@@ -115,17 +142,22 @@ def apply_conditions(df, condition):
         return df[col].notna() & (df[col] != "")
 
     if pd.api.types.is_numeric_dtype(df[col]):
-        val = float(val)
+        try:
+            val = float(val)
+        except:
+            return pd.Series([True] * len(df))
+
         if op == ">": return df[col] > val
         if op == "<": return df[col] < val
         if op == ">=": return df[col] >= val
         if op == "<=": return df[col] <= val
-        if op == "==": return df[col] == val
+        if op in ["=", "=="]: return df[col] == val
         if op == "!=": return df[col] != val
 
-    series = df[col].astype(str).str.strip().str.lower()
-    val = str(val).strip().lower()
-    if op == "==": return series == val
+    series = df[col].astype(str).str.lower().str.strip()
+    val = str(val).lower().strip()
+
+    if op in ["=", "=="]: return series == val
     if op == "!=": return series != val
 
     return pd.Series([True] * len(df))
@@ -145,17 +177,35 @@ def apply_transformations(df, instructions):
     # AGGREGATION
     if "aggregation" in instructions:
         agg = instructions["aggregation"]
-        group_col = agg.get("group_by")
-        agg_col = agg.get("column")
-        func = agg.get("function", "").lower()
+        group_col = match_column(result_df, agg.get("group_by"))
+        agg_col = match_column(result_df, agg.get("column"))
+        func = str(agg.get("function", "")).lower()
 
-        if group_col in result_df.columns and agg_col in result_df.columns:
+        if group_col and agg_col:
+
             if func in ["avg", "average", "mean"]:
-                result_df = result_df.groupby(group_col)[agg_col].mean().reset_index()
-            elif func == "sum":
-                result_df = result_df.groupby(group_col)[agg_col].sum().reset_index()
+                result_df = (
+                    result_df.groupby(group_col)[agg_col]
+                    .mean()
+                    .reset_index()
+                    .rename(columns={agg_col: f"Average_{agg_col}"})
+                )
+
+            elif func in ["sum", "total"]:
+                result_df = (
+                    result_df.groupby(group_col)[agg_col]
+                    .sum()
+                    .reset_index()
+                    .rename(columns={agg_col: f"Total_{agg_col}"})
+                )
+
             elif func == "count":
-                result_df = result_df.groupby(group_col)[agg_col].count().reset_index()
+                result_df = (
+                    result_df.groupby(group_col)[agg_col]
+                    .count()
+                    .reset_index()
+                    .rename(columns={agg_col: f"Count_{agg_col}"})
+                )
 
     return result_df
 
@@ -185,42 +235,57 @@ with tab1:
         system_prompt = f"""
 Return ONLY valid JSON.
 
-Supported structure:
-
+Structure:
 {{
   "filter": {{
-      "logic": "AND",
-      "conditions": []
+    "logic": "AND",
+    "conditions": []
   }},
   "aggregation": {{
-      "group_by": "Department",
-      "column": "Salary",
-      "function": "avg"
+    "group_by": "",
+    "column": "",
+    "function": ""
   }}
 }}
 
 Operators:
->, <, >=, <=, ==, !=, is_null, not_null
+>, <, >=, <=, =, !=, is_null, not_null
 
-Columns:
+Available Columns:
 {df.columns.tolist()}
 """
 
-        response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": etl_prompt}
-            ],
-            temperature=0.1
-        )
+        try:
+            response = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": etl_prompt}
+                ],
+                temperature=0.0
+            )
 
-        raw_output = response.choices[0].message.content
+            if not response or not response.choices:
+                st.error("AI returned no response.")
+                st.stop()
+
+            raw_output = response.choices[0].message.content
+
+        except Exception as e:
+            st.error(f"AI call failed: {str(e)}")
+            st.stop()
+
         instructions = extract_json(raw_output)
 
         if instructions is None:
             st.error("AI returned invalid JSON.")
             st.code(raw_output)
+            st.stop()
+
+        is_valid, error = validate_instructions(instructions)
+        if not is_valid:
+            st.error(f"Invalid instruction schema: {error}")
+            st.json(instructions)
             st.stop()
 
         result_df = apply_transformations(df, instructions)
@@ -239,7 +304,7 @@ Columns:
         })
 
 # ===================================
-# JIRA TAB (UNCHANGED)
+# JIRA TAB (UNCHANGED LOGIC)
 # ===================================
 with tab2:
 
@@ -258,19 +323,26 @@ Generate:
 Return structured professional format.
 """
 
-        response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": jira_system_prompt},
-                {"role": "user", "content": jira_prompt}
-            ],
-            temperature=0.3
-        )
+        try:
+            response = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[
+                    {"role": "system", "content": jira_system_prompt},
+                    {"role": "user", "content": jira_prompt}
+                ],
+                temperature=0.3
+            )
 
-        jira_output = response.choices[0].message.content
+            if not response or not response.choices:
+                st.error("AI returned no response.")
+                st.stop()
 
-        st.subheader("Jira Breakdown")
-        st.markdown(jira_output)
+            jira_output = response.choices[0].message.content
+            st.subheader("Jira Breakdown")
+            st.markdown(jira_output)
+
+        except Exception as e:
+            st.error(f"AI call failed: {str(e)}")
 
 # ===================================
 # HISTORY
