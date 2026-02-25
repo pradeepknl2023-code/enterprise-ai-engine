@@ -68,23 +68,16 @@ if "history" not in st.session_state:
     st.session_state.history = []
 
 # -----------------------------------
-# SAFE JSON PARSER
+# SAFE JSON EXTRACTOR
 # -----------------------------------
 def extract_json(text):
-    """
-    Extracts first JSON block from model response and fixes common issues.
-    """
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:
         return None
-
     json_str = match.group(0)
-
-    # Fix common issues
     json_str = json_str.replace("'", '"')
     json_str = re.sub(r",\s*}", "}", json_str)
     json_str = re.sub(r",\s*]", "]", json_str)
-
     try:
         return json.loads(json_str)
     except:
@@ -97,15 +90,13 @@ def apply_conditions(df, condition):
 
     if "logic" in condition:
         logic = condition["logic"]
-        conditions = condition["conditions"]
-        masks = [apply_conditions(df, c) for c in conditions]
-
+        masks = [apply_conditions(df, c) for c in condition["conditions"]]
         if logic == "AND":
             mask = masks[0]
             for m in masks[1:]:
                 mask &= m
             return mask
-        elif logic == "OR":
+        if logic == "OR":
             mask = masks[0]
             for m in masks[1:]:
                 mask |= m
@@ -118,13 +109,11 @@ def apply_conditions(df, condition):
     if col not in df.columns:
         return pd.Series([True] * len(df))
 
-    # Handle NULL checks
     if op == "is_null":
         return df[col].isna() | (df[col] == "")
     if op == "not_null":
         return df[col].notna() & (df[col] != "")
 
-    # Numeric
     if pd.api.types.is_numeric_dtype(df[col]):
         val = float(val)
         if op == ">": return df[col] > val
@@ -134,7 +123,6 @@ def apply_conditions(df, condition):
         if op == "==": return df[col] == val
         if op == "!=": return df[col] != val
 
-    # String
     series = df[col].astype(str).str.strip().str.lower()
     val = str(val).strip().lower()
     if op == "==": return series == val
@@ -149,9 +137,25 @@ def apply_transformations(df, instructions):
 
     result_df = df.copy()
 
+    # FILTER
     if "filter" in instructions:
         mask = apply_conditions(result_df, instructions["filter"])
         result_df = result_df[mask]
+
+    # AGGREGATION
+    if "aggregation" in instructions:
+        agg = instructions["aggregation"]
+        group_col = agg.get("group_by")
+        agg_col = agg.get("column")
+        func = agg.get("function", "").lower()
+
+        if group_col in result_df.columns and agg_col in result_df.columns:
+            if func in ["avg", "average", "mean"]:
+                result_df = result_df.groupby(group_col)[agg_col].mean().reset_index()
+            elif func == "sum":
+                result_df = result_df.groupby(group_col)[agg_col].sum().reset_index()
+            elif func == "count":
+                result_df = result_df.groupby(group_col)[agg_col].count().reset_index()
 
     return result_df
 
@@ -180,15 +184,18 @@ with tab1:
 
         system_prompt = f"""
 Return ONLY valid JSON.
+
 Supported structure:
 
 {{
   "filter": {{
       "logic": "AND",
-      "conditions": [
-          {{"column": "Department", "operator": "==", "value": "Finance"}},
-          {{"column": "Email", "operator": "not_null"}}
-      ]
+      "conditions": []
+  }},
+  "aggregation": {{
+      "group_by": "Department",
+      "column": "Salary",
+      "function": "avg"
   }}
 }}
 
@@ -224,36 +231,12 @@ Columns:
         st.subheader("Transformed Output")
         st.dataframe(result_df, use_container_width=True)
 
-        # Audit log
         st.session_state.history.append({
             "Time": datetime.datetime.now(),
             "Prompt": etl_prompt,
             "Rows Before": original_rows,
             "Rows After": len(result_df)
         })
-
-        # Export
-        st.markdown('<div class="section-title">Export Results</div>', unsafe_allow_html=True)
-        col1, col2 = st.columns(2)
-
-        col1.download_button(
-            "Download CSV",
-            result_df.to_csv(index=False).encode("utf-8"),
-            "etl_output.csv",
-            "text/csv"
-        )
-
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            result_df.to_excel(writer, sheet_name="Transformed_Data", index=False)
-            pd.DataFrame(st.session_state.history).to_excel(writer, sheet_name="Audit_Log", index=False)
-
-        col2.download_button(
-            "Download Excel",
-            output.getvalue(),
-            "etl_output.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
 
 # ===================================
 # JIRA TAB (UNCHANGED)
