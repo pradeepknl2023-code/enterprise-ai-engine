@@ -1,9 +1,8 @@
 import streamlit as st
 import pandas as pd
 import os
-import re
 import datetime
-import numpy as np
+import json
 from groq import Groq
 from io import BytesIO
 
@@ -55,7 +54,11 @@ st.markdown("""
 # GROQ SETUP
 # -----------------------------------
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+if not GROQ_API_KEY:
+    st.error("Set GROQ_API_KEY in Streamlit Secrets.")
+    st.stop()
+
+client = Groq(api_key=GROQ_API_KEY)
 
 # -----------------------------------
 # SESSION STATE
@@ -63,140 +66,221 @@ client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 if "history" not in st.session_state:
     st.session_state.history = []
 
-# ===================================
-# RULE-BASED ENGINE
-# ===================================
+# -----------------------------------
+# LLM INTENT PARSER (STRICT JSON)
+# -----------------------------------
+def parse_intent(prompt, columns):
+    system_prompt = f"""
+You are an Enterprise Data Transformation Parser.
 
-def apply_rule_based(df, prompt):
-    text = prompt.lower()
+Return STRICT JSON only.
+No markdown. No explanation.
 
-    # ---------------- FILTER > < >= <= = ----------------
-    filter_match = re.search(r"(\w+)\s*(>=|<=|>|<|=)\s*([\w\.]+)", text)
-    if filter_match:
-        col, op, val = filter_match.groups()
-        col = col.strip()
-        if col.capitalize() in df.columns:
-            if val.replace('.', '', 1).isdigit():
-                val = float(val)
+Supported:
+filter
+conditional_column
+aggregation
+
+JSON STRUCTURE:
+
+{{
+"type": "",
+"logic": "AND" | "OR",
+"filters": [
+  {{
+    "column": "",
+    "operator": ">" | "<" | ">=" | "<=" | "=" | "between" | "in",
+    "value": ""
+  }}
+],
+"new_columns": [
+  {{
+    "new_column": "",
+    "condition": {{"column": "", "operator": "", "value": ""}},
+    "true_value": "",
+    "false_value": ""
+  }}
+],
+"aggregation": {{
+  "group_by": [],
+  "metrics": [
+     {{"column": "", "operation": "avg" | "sum" | "count"}}
+  ]
+}}
+}}
+
+Available columns: {columns}
+"""
+
+    response = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0
+    )
+
+    return response.choices[0].message.content.strip()
+
+# -----------------------------------
+# SAFE RULE ENGINE
+# -----------------------------------
+def apply_rules(df, intent_json):
+    try:
+        intent = json.loads(intent_json)
+    except:
+        st.error("Invalid JSON from AI.")
+        return df
+
+    df = df.copy()
+    df = df.fillna("")
+
+    intent_type = intent.get("type")
+
+    # ---------------- FILTER ----------------
+    if intent_type == "filter":
+        logic = intent.get("logic", "AND")
+        conditions = []
+
+        for f in intent.get("filters", []):
+            col = f.get("column")
+            op = f.get("operator")
+            val = f.get("value")
+
+            if col not in df.columns:
+                continue
+
+            series = df[col]
+
+            if pd.api.types.is_numeric_dtype(series):
+                series = pd.to_numeric(series, errors="coerce")
+
+                if op == ">":
+                    cond = series > float(val)
+                elif op == "<":
+                    cond = series < float(val)
+                elif op == ">=":
+                    cond = series >= float(val)
+                elif op == "<=":
+                    cond = series <= float(val)
+                elif op == "=":
+                    cond = series == float(val)
+                elif op == "between":
+                    low, high = map(float, val.split(","))
+                    cond = series.between(low, high)
+                else:
+                    continue
+            else:
+                series = series.astype(str).str.strip().str.lower()
+                if op == "=":
+                    cond = series == str(val).lower()
+                elif op == "in":
+                    values = [v.strip().lower() for v in val.split(",")]
+                    cond = series.isin(values)
+                else:
+                    continue
+
+            conditions.append(cond)
+
+        if conditions:
+            if logic == "OR":
+                final_condition = conditions[0]
+                for c in conditions[1:]:
+                    final_condition = final_condition | c
+            else:
+                final_condition = conditions[0]
+                for c in conditions[1:]:
+                    final_condition = final_condition & c
+
+            df = df[final_condition]
+
+        return df
+
+    # ---------------- CONDITIONAL COLUMNS ----------------
+    if intent_type == "conditional_column":
+        for rule in intent.get("new_columns", []):
+            col = rule["condition"]["column"]
+            op = rule["condition"]["operator"]
+            val = rule["condition"]["value"]
+
+            if col not in df.columns:
+                continue
+
+            series = pd.to_numeric(df[col], errors="coerce")
+
             if op == ">":
-                return df[df[col.capitalize()] > val]
-            if op == "<":
-                return df[df[col.capitalize()] < val]
-            if op == ">=":
-                return df[df[col.capitalize()] >= val]
-            if op == "<=":
-                return df[df[col.capitalize()] <= val]
-            if op == "=":
-                return df[df[col.capitalize()].astype(str).str.lower().str.strip() == str(val).lower()]
+                cond = series > float(val)
+            elif op == "<":
+                cond = series < float(val)
+            elif op == ">=":
+                cond = series >= float(val)
+            elif op == "<=":
+                cond = series <= float(val)
+            elif op == "=":
+                cond = series == float(val)
+            else:
+                continue
 
-    # ---------------- BETWEEN ----------------
-    between_match = re.search(r"(\w+)\s+between\s+(\d+)\s+and\s+(\d+)", text)
-    if between_match:
-        col, low, high = between_match.groups()
-        col = col.capitalize()
-        if col in df.columns:
-            return df[(df[col] >= float(low)) & (df[col] <= float(high))]
+            df[rule["new_column"]] = cond.map(
+                lambda x: rule["true_value"] if x else rule["false_value"]
+            )
+
+        return df
 
     # ---------------- AGGREGATION ----------------
-    if "average" in text or "avg" in text:
-        match = re.search(r"average\s+(\w+)\s+by\s+(\w+)", text)
-        if match:
-            metric, group = match.groups()
-            return df.groupby(group.capitalize())[metric.capitalize()].mean().reset_index()
+    if intent_type == "aggregation":
+        agg = intent.get("aggregation", {})
+        group_cols = agg.get("group_by", [])
+        metrics = agg.get("metrics", [])
 
-    if "sum" in text or "total" in text:
-        match = re.search(r"(sum|total)\s+(\w+)\s+by\s+(\w+)", text)
-        if match:
-            _, metric, group = match.groups()
-            return df.groupby(group.capitalize())[metric.capitalize()].sum().reset_index()
+        agg_dict = {}
+        for m in metrics:
+            col = m["column"]
+            op = m["operation"]
+            if col in df.columns:
+                agg_dict[col] = op
 
-    if "count" in text:
-        match = re.search(r"count\s+(\w+)\s+by\s+(\w+)", text)
-        if match:
-            metric, group = match.groups()
-            return df.groupby(group.capitalize())[metric.capitalize()].count().reset_index()
+        if group_cols:
+            return df.groupby(group_cols).agg(agg_dict).reset_index()
+        else:
+            return df.agg(agg_dict).to_frame().T
 
-    # ---------------- NEW COLUMN RULE ----------------
-    if "create" in text and "column" in text:
-        if "salary" in text and "high" in text:
-            df["Salary_Level"] = np.where(df["Salary"] >= 85000, "High",
-                                  np.where(df["Salary"] >= 75000, "Medium", "Low"))
-            return df
+    return df
 
-    return None  # fallback to AI
-
-# ===================================
-# SAFE AI EXECUTION
-# ===================================
-
-def safe_exec(df, code):
-    code = re.sub(r"```.*?```", "", code, flags=re.DOTALL)
-    python_lines = []
-    for line in code.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if re.match(r"^(df|pd|np|import|from|\w+.*=)", line):
-            python_lines.append(line)
-    cleaned_code = "\n".join(python_lines)
-    if not cleaned_code:
-        return df
-    local_env = {"df": df.copy(), "pd": pd, "np": np}
-    try:
-        exec(cleaned_code, {}, local_env)
-    except Exception:
-        return df
-    return local_env["df"]
-
-# ===================================
+# -----------------------------------
 # TABS
-# ===================================
-
+# -----------------------------------
 tab1, tab2 = st.tabs(["AI ETL Engine", "AI Jira Breakdown"])
 
 # ===================================
-# ETL TAB
+# ========== AI ETL TAB =============
 # ===================================
-
 with tab1:
-
     st.markdown('<div class="section-title">Business Description</div>', unsafe_allow_html=True)
     etl_prompt = st.text_area("Describe data transformation", height=140)
     uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
 
     if st.button("Execute ETL"):
-
-        if not etl_prompt or not uploaded_file:
-            st.warning("Provide prompt and CSV.")
+        if not etl_prompt.strip():
+            st.warning("Enter transformation description.")
+            st.stop()
+        if not uploaded_file:
+            st.warning("Upload CSV file.")
             st.stop()
 
         df = pd.read_csv(uploaded_file)
         original_rows = len(df)
 
-        # 1️⃣ Try rule-based first
-        transformed_df = apply_rule_based(df.copy(), etl_prompt)
+        try:
+            intent_json = parse_intent(etl_prompt, df.columns.tolist())
+            transformed_df = apply_rules(df, intent_json)
+        except Exception as e:
+            st.error(f"ETL failed: {e}")
+            transformed_df = df.copy()
 
-        # 2️⃣ If not handled → AI fallback
-        ai_code = ""
-        if transformed_df is None:
-            system_prompt = f"""
-Return ONLY pandas executable code modifying df.
-No explanation.
-Columns available: {df.columns.tolist()}
-"""
-            response = client.chat.completions.create(
-                model="llama-3.1-8b-instant",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": etl_prompt}
-                ],
-                temperature=0.1
-            )
-            ai_code = response.choices[0].message.content
-            transformed_df = safe_exec(df.copy(), ai_code)
-
-        st.subheader("Generated Code (If AI Used)")
-        st.code(ai_code if ai_code else "Rule-based engine executed")
+        st.subheader("Generated Intent JSON")
+        st.code(intent_json)
 
         st.subheader("Transformed Output")
         st.dataframe(transformed_df, use_container_width=True)
@@ -208,8 +292,10 @@ Columns available: {df.columns.tolist()}
             "Rows After": len(transformed_df)
         })
 
+        # Export
         st.markdown('<div class="section-title">Export Results</div>', unsafe_allow_html=True)
         col1, col2 = st.columns(2)
+
         csv_data = transformed_df.to_csv(index=False).encode("utf-8")
         col1.download_button("Download CSV", csv_data, "etl_output.csv", "text/csv")
 
@@ -218,20 +304,27 @@ Columns available: {df.columns.tolist()}
             transformed_df.to_excel(writer, sheet_name="Transformed_Data", index=False)
             pd.DataFrame(st.session_state.history).to_excel(writer, sheet_name="Audit_Log", index=False)
 
-        col2.download_button("Download Excel", output.getvalue(), "etl_output.xlsx",
-                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        col2.download_button(
+            "Download Excel",
+            output.getvalue(),
+            "etl_output.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
 # ===================================
-# JIRA TAB (UNCHANGED)
+# ========== JIRA TAB (UNCHANGED) ===
 # ===================================
-
 with tab2:
     st.markdown('<div class="section-title">Business Description</div>', unsafe_allow_html=True)
     jira_prompt = st.text_area("Describe feature or initiative", height=140)
 
     if st.button("Generate Jira Breakdown"):
+        if not jira_prompt.strip():
+            st.warning("Enter business description.")
+            st.stop()
 
-        jira_system_prompt = """
+        with st.spinner("Generating Agile breakdown..."):
+            jira_system_prompt = """
 You are a Senior Agile Delivery Manager.
 Generate:
 - 1 Epic
@@ -240,22 +333,39 @@ Generate:
 - Subtasks
 Return structured professional format.
 """
-        response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": jira_system_prompt},
-                {"role": "user", "content": jira_prompt}
-            ],
-            temperature=0.3
-        )
+            response = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[
+                    {"role": "system", "content": jira_system_prompt},
+                    {"role": "user", "content": jira_prompt}
+                ],
+                temperature=0.3
+            )
+            jira_output = response.choices[0].message.content
 
         st.subheader("Jira Breakdown")
-        st.markdown(response.choices[0].message.content)
+        st.markdown(jira_output)
 
-# ===================================
-# HISTORY
-# ===================================
+        st.markdown('<div class="section-title">Export Jira Output</div>', unsafe_allow_html=True)
+        col1, col2 = st.columns(2)
 
+        col1.download_button("Download as TXT", jira_output, "jira_breakdown.txt", "text/plain")
+
+        jira_df = pd.DataFrame({"Jira Breakdown": [jira_output]})
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            jira_df.to_excel(writer, sheet_name="Jira_Output", index=False)
+
+        col2.download_button(
+            "Download as Excel",
+            output.getvalue(),
+            "jira_breakdown.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+# -----------------------------------
+# HISTORY PANEL
+# -----------------------------------
 st.markdown("---")
 st.markdown('<div class="section-title">Transformation History</div>', unsafe_allow_html=True)
 
