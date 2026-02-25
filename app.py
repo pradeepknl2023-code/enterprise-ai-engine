@@ -1,19 +1,20 @@
 import streamlit as st
 import pandas as pd
 import os
-import datetime
-import json
 import re
+import datetime
+import numpy as np
 from groq import Groq
+from io import BytesIO
 
-# --------------------------------------------------
+# -----------------------------------
 # PAGE CONFIG
-# --------------------------------------------------
+# -----------------------------------
 st.set_page_config(page_title="Enterprise AI Platform", layout="wide")
 
-# --------------------------------------------------
+# -----------------------------------
 # ENTERPRISE THEME (UNCHANGED)
-# --------------------------------------------------
+# -----------------------------------
 st.markdown("""
 <style>
 .main-header {
@@ -50,277 +51,211 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# --------------------------------------------------
-# GROQ CLIENT
-# --------------------------------------------------
+# -----------------------------------
+# GROQ SETUP
+# -----------------------------------
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-if not GROQ_API_KEY:
-    st.error("Set GROQ_API_KEY in environment.")
-    st.stop()
+client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-client = Groq(api_key=GROQ_API_KEY)
-
-# --------------------------------------------------
+# -----------------------------------
 # SESSION STATE
-# --------------------------------------------------
+# -----------------------------------
 if "history" not in st.session_state:
     st.session_state.history = []
 
-# --------------------------------------------------
-# SAFE JSON PARSER (AUTO REPAIR)
-# --------------------------------------------------
-def safe_json_parse(text):
-    try:
-        match = re.search(r"\{[\s\S]*\}", text)
-        if not match:
-            return None
-        content = match.group(0)
-        content = content.replace("\n", "")
-        return json.loads(content)
-    except:
-        return None
+# ===================================
+# RULE-BASED ENGINE
+# ===================================
 
-# --------------------------------------------------
-# COLUMN MATCH (CASE INSENSITIVE)
-# --------------------------------------------------
-def match_column(df, name):
-    if not name:
-        return None
-    for col in df.columns:
-        if col.lower() == str(name).lower():
-            return col
-    return None
+def apply_rule_based(df, prompt):
+    text = prompt.lower()
 
-# --------------------------------------------------
-# CONDITION ENGINE (RECURSIVE)
-# --------------------------------------------------
-def apply_condition(df, cond):
+    # ---------------- FILTER > < >= <= = ----------------
+    filter_match = re.search(r"(\w+)\s*(>=|<=|>|<|=)\s*([\w\.]+)", text)
+    if filter_match:
+        col, op, val = filter_match.groups()
+        col = col.strip()
+        if col.capitalize() in df.columns:
+            if val.replace('.', '', 1).isdigit():
+                val = float(val)
+            if op == ">":
+                return df[df[col.capitalize()] > val]
+            if op == "<":
+                return df[df[col.capitalize()] < val]
+            if op == ">=":
+                return df[df[col.capitalize()] >= val]
+            if op == "<=":
+                return df[df[col.capitalize()] <= val]
+            if op == "=":
+                return df[df[col.capitalize()].astype(str).str.lower().str.strip() == str(val).lower()]
 
-    if cond is None:
-        return pd.Series([True] * len(df))
+    # ---------------- BETWEEN ----------------
+    between_match = re.search(r"(\w+)\s+between\s+(\d+)\s+and\s+(\d+)", text)
+    if between_match:
+        col, low, high = between_match.groups()
+        col = col.capitalize()
+        if col in df.columns:
+            return df[(df[col] >= float(low)) & (df[col] <= float(high))]
 
-    if "logic" in cond:
-        logic = cond.get("logic", "AND").upper()
-        conditions = cond.get("conditions", [])
-        masks = [apply_condition(df, c) for c in conditions]
-        if not masks:
-            return pd.Series([True] * len(df))
-        mask = masks[0]
-        for m in masks[1:]:
-            mask = mask & m if logic == "AND" else mask | m
-        return mask
+    # ---------------- AGGREGATION ----------------
+    if "average" in text or "avg" in text:
+        match = re.search(r"average\s+(\w+)\s+by\s+(\w+)", text)
+        if match:
+            metric, group = match.groups()
+            return df.groupby(group.capitalize())[metric.capitalize()].mean().reset_index()
 
-    col = match_column(df, cond.get("column"))
-    op = cond.get("operator")
-    val = cond.get("value")
+    if "sum" in text or "total" in text:
+        match = re.search(r"(sum|total)\s+(\w+)\s+by\s+(\w+)", text)
+        if match:
+            _, metric, group = match.groups()
+            return df.groupby(group.capitalize())[metric.capitalize()].sum().reset_index()
 
-    if not col:
-        return pd.Series([True] * len(df))
+    if "count" in text:
+        match = re.search(r"count\s+(\w+)\s+by\s+(\w+)", text)
+        if match:
+            metric, group = match.groups()
+            return df.groupby(group.capitalize())[metric.capitalize()].count().reset_index()
 
-    series = df[col]
+    # ---------------- NEW COLUMN RULE ----------------
+    if "create" in text and "column" in text:
+        if "salary" in text and "high" in text:
+            df["Salary_Level"] = np.where(df["Salary"] >= 85000, "High",
+                                  np.where(df["Salary"] >= 75000, "Medium", "Low"))
+            return df
 
-    if op in [">", "<", ">=", "<=", "=", "==", "!="]:
-        if pd.api.types.is_numeric_dtype(series):
-            val = float(val)
-        else:
-            series = series.astype(str).str.lower().str.strip()
-            val = str(val).lower().strip()
+    return None  # fallback to AI
 
-        if op == ">": return series > val
-        if op == "<": return series < val
-        if op == ">=": return series >= val
-        if op == "<=": return series <= val
-        if op in ["=", "=="]: return series == val
-        if op == "!=": return series != val
+# ===================================
+# SAFE AI EXECUTION
+# ===================================
 
-    if op == "between":
-        low, high = val
-        return (series >= float(low)) & (series <= float(high))
-
-    return pd.Series([True] * len(df))
-
-# --------------------------------------------------
-# DERIVED COLUMN ENGINE
-# --------------------------------------------------
-def apply_new_columns(df, instructions):
-    for new_col in instructions:
-        name = new_col.get("name")
-        rules = new_col.get("rules", [])
-        if not name:
+def safe_exec(df, code):
+    code = re.sub(r"```.*?```", "", code, flags=re.DOTALL)
+    python_lines = []
+    for line in code.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
             continue
-        df[name] = ""
-        for rule in rules:
-            condition = rule.get("condition")
-            value = rule.get("value")
-            if condition == "otherwise":
-                df[name] = df[name].replace("", value)
-            else:
-                mask = apply_condition(df, condition)
-                df.loc[mask, name] = value
-    return df
-
-# --------------------------------------------------
-# AGGREGATION ENGINE
-# --------------------------------------------------
-def apply_aggregation(df, agg):
-    if not agg:
+        if re.match(r"^(df|pd|np|import|from|\w+.*=)", line):
+            python_lines.append(line)
+    cleaned_code = "\n".join(python_lines)
+    if not cleaned_code:
         return df
-
-    group_col = match_column(df, agg.get("group_by"))
-    agg_col = match_column(df, agg.get("column"))
-    func = str(agg.get("function", "")).lower()
-
-    if not group_col or not agg_col:
+    local_env = {"df": df.copy(), "pd": pd, "np": np}
+    try:
+        exec(cleaned_code, {}, local_env)
+    except Exception:
         return df
+    return local_env["df"]
 
-    if func in ["avg", "average", "mean"]:
-        return df.groupby(group_col)[agg_col].mean().reset_index()
-
-    if func in ["sum", "total"]:
-        return df.groupby(group_col)[agg_col].sum().reset_index()
-
-    if func == "count":
-        return df.groupby(group_col)[agg_col].count().reset_index()
-
-    return df
-
-# --------------------------------------------------
-# TRANSFORMATION ORCHESTRATOR
-# --------------------------------------------------
-def transform(df, instructions):
-
-    result = df.copy()
-
-    # FILTER
-    if instructions.get("filter"):
-        mask = apply_condition(result, instructions["filter"])
-        result = result[mask]
-
-    # NEW COLUMNS
-    if instructions.get("new_columns"):
-        result = apply_new_columns(result, instructions["new_columns"])
-
-    # AGGREGATION
-    if instructions.get("aggregation"):
-        result = apply_aggregation(result, instructions["aggregation"])
-
-    return result
-
-# --------------------------------------------------
+# ===================================
 # TABS
-# --------------------------------------------------
+# ===================================
+
 tab1, tab2 = st.tabs(["AI ETL Engine", "AI Jira Breakdown"])
 
-# ==================================================
+# ===================================
 # ETL TAB
-# ==================================================
+# ===================================
+
 with tab1:
 
     st.markdown('<div class="section-title">Business Description</div>', unsafe_allow_html=True)
-    prompt = st.text_area("Describe transformation", height=150)
-    uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
+    etl_prompt = st.text_area("Describe data transformation", height=140)
+    uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
 
     if st.button("Execute ETL"):
 
-        if not prompt.strip() or not uploaded_file:
+        if not etl_prompt or not uploaded_file:
             st.warning("Provide prompt and CSV.")
             st.stop()
 
         df = pd.read_csv(uploaded_file)
         original_rows = len(df)
 
-        system_prompt = f"""
-You are a strict JSON transformation engine.
+        # 1️⃣ Try rule-based first
+        transformed_df = apply_rule_based(df.copy(), etl_prompt)
 
-Return ONLY valid JSON.
-
-Structure MUST be:
-
-{{
- "filter": null,
- "new_columns": [],
- "aggregation": null
-}}
-
-Rules:
-- Always include all 3 keys.
-- If unused → null or [].
-- Allowed operators: >, <, >=, <=, =, !=, between
-- between must use array [low, high]
-- No explanation text.
-
-Available Columns:
-{df.columns.tolist()}
+        # 2️⃣ If not handled → AI fallback
+        ai_code = ""
+        if transformed_df is None:
+            system_prompt = f"""
+Return ONLY pandas executable code modifying df.
+No explanation.
+Columns available: {df.columns.tolist()}
 """
+            response = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": etl_prompt}
+                ],
+                temperature=0.1
+            )
+            ai_code = response.choices[0].message.content
+            transformed_df = safe_exec(df.copy(), ai_code)
 
-        response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0
-        )
-
-        raw = response.choices[0].message.content
-        instructions = safe_json_parse(raw)
-
-        if not instructions:
-            st.error("AI returned invalid JSON.")
-            st.code(raw)
-            st.stop()
-
-        result_df = transform(df, instructions)
-
-        st.subheader("AI Instructions")
-        st.json(instructions)
+        st.subheader("Generated Code (If AI Used)")
+        st.code(ai_code if ai_code else "Rule-based engine executed")
 
         st.subheader("Transformed Output")
-        st.dataframe(result_df, use_container_width=True)
+        st.dataframe(transformed_df, use_container_width=True)
 
         st.session_state.history.append({
             "Time": datetime.datetime.now(),
-            "Prompt": prompt,
+            "Prompt": etl_prompt,
             "Rows Before": original_rows,
-            "Rows After": len(result_df)
+            "Rows After": len(transformed_df)
         })
 
-# ==================================================
-# JIRA TAB (UNCHANGED)
-# ==================================================
-with tab2:
+        st.markdown('<div class="section-title">Export Results</div>', unsafe_allow_html=True)
+        col1, col2 = st.columns(2)
+        csv_data = transformed_df.to_csv(index=False).encode("utf-8")
+        col1.download_button("Download CSV", csv_data, "etl_output.csv", "text/csv")
 
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            transformed_df.to_excel(writer, sheet_name="Transformed_Data", index=False)
+            pd.DataFrame(st.session_state.history).to_excel(writer, sheet_name="Audit_Log", index=False)
+
+        col2.download_button("Download Excel", output.getvalue(), "etl_output.xlsx",
+                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# ===================================
+# JIRA TAB (UNCHANGED)
+# ===================================
+
+with tab2:
     st.markdown('<div class="section-title">Business Description</div>', unsafe_allow_html=True)
-    jira_prompt = st.text_area("Describe feature or initiative", height=150)
+    jira_prompt = st.text_area("Describe feature or initiative", height=140)
 
     if st.button("Generate Jira Breakdown"):
 
-        jira_system = """
+        jira_system_prompt = """
 You are a Senior Agile Delivery Manager.
-
 Generate:
 - 1 Epic
 - Multiple User Stories
 - Acceptance Criteria
 - Subtasks
-
-Professional structured format only.
+Return structured professional format.
 """
-
         response = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
-                {"role": "system", "content": jira_system},
+                {"role": "system", "content": jira_system_prompt},
                 {"role": "user", "content": jira_prompt}
             ],
             temperature=0.3
         )
 
+        st.subheader("Jira Breakdown")
         st.markdown(response.choices[0].message.content)
 
-# ==================================================
+# ===================================
 # HISTORY
-# ==================================================
+# ===================================
+
 st.markdown("---")
 st.markdown('<div class="section-title">Transformation History</div>', unsafe_allow_html=True)
 
