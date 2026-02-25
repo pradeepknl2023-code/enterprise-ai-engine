@@ -89,7 +89,7 @@ Ranking:
 def get_clean_json(user_prompt):
     for _ in range(2):
         response = client.chat.completions.create(
-            model="llama3-70b-8192",
+            model="llama-3.3-70b-versatile",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt}
@@ -270,7 +270,7 @@ jira_input = st.text_area("Enter Business Requirement")
 
 if st.button("Generate Jira Stories"):
     response = client.chat.completions.create(
-        model="llama3-70b-8192",
+        model="llama-3.3-70b-versatile",
         messages=[
             {"role": "system", "content": "Generate structured Jira Epics, Stories, Subtasks, and Acceptance Criteria."},
             {"role": "user", "content": jira_input}
