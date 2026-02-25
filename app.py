@@ -5,16 +5,15 @@ import datetime
 import json
 import re
 from groq import Groq
-from io import BytesIO
 
-# -----------------------------------
+# --------------------------------------------------
 # PAGE CONFIG
-# -----------------------------------
+# --------------------------------------------------
 st.set_page_config(page_title="Enterprise AI Platform", layout="wide")
 
-# -----------------------------------
+# --------------------------------------------------
 # ENTERPRISE THEME (UNCHANGED)
-# -----------------------------------
+# --------------------------------------------------
 st.markdown("""
 <style>
 .main-header {
@@ -51,9 +50,9 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# -----------------------------------
-# GROQ SETUP
-# -----------------------------------
+# --------------------------------------------------
+# GROQ CLIENT
+# --------------------------------------------------
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     st.error("Set GROQ_API_KEY in environment.")
@@ -61,112 +60,111 @@ if not GROQ_API_KEY:
 
 client = Groq(api_key=GROQ_API_KEY)
 
-# -----------------------------------
+# --------------------------------------------------
 # SESSION STATE
-# -----------------------------------
+# --------------------------------------------------
 if "history" not in st.session_state:
     st.session_state.history = []
 
-# -----------------------------------
-# JSON EXTRACTOR
-# -----------------------------------
-def extract_json(text):
+# --------------------------------------------------
+# SAFE JSON PARSER (AUTO REPAIR)
+# --------------------------------------------------
+def safe_json_parse(text):
     try:
         match = re.search(r"\{[\s\S]*\}", text)
         if not match:
             return None
-        return json.loads(match.group(0))
+        content = match.group(0)
+        content = content.replace("\n", "")
+        return json.loads(content)
     except:
         return None
 
-# -----------------------------------
-# COLUMN MATCH
-# -----------------------------------
+# --------------------------------------------------
+# COLUMN MATCH (CASE INSENSITIVE)
+# --------------------------------------------------
 def match_column(df, name):
+    if not name:
+        return None
     for col in df.columns:
         if col.lower() == str(name).lower():
             return col
     return None
 
-# -----------------------------------
-# FILTER ENGINE
-# -----------------------------------
-def apply_conditions(df, condition):
+# --------------------------------------------------
+# CONDITION ENGINE (RECURSIVE)
+# --------------------------------------------------
+def apply_condition(df, cond):
 
-    if "logic" in condition:
-        logic = condition.get("logic", "AND").upper()
-        conditions = condition.get("conditions", [])
+    if cond is None:
+        return pd.Series([True] * len(df))
 
-        if not conditions:
+    if "logic" in cond:
+        logic = cond.get("logic", "AND").upper()
+        conditions = cond.get("conditions", [])
+        masks = [apply_condition(df, c) for c in conditions]
+        if not masks:
             return pd.Series([True] * len(df))
-
-        masks = [apply_conditions(df, c) for c in conditions]
         mask = masks[0]
-
         for m in masks[1:]:
-            if logic == "AND":
-                mask &= m
-            elif logic == "OR":
-                mask |= m
-
+            mask = mask & m if logic == "AND" else mask | m
         return mask
 
-    col = match_column(df, condition.get("column"))
-    op = condition.get("operator")
-    val = condition.get("value")
+    col = match_column(df, cond.get("column"))
+    op = cond.get("operator")
+    val = cond.get("value")
 
     if not col:
         return pd.Series([True] * len(df))
 
+    series = df[col]
+
     if op in [">", "<", ">=", "<=", "=", "==", "!="]:
-        if pd.api.types.is_numeric_dtype(df[col]):
+        if pd.api.types.is_numeric_dtype(series):
             val = float(val)
-            if op == ">": return df[col] > val
-            if op == "<": return df[col] < val
-            if op == ">=": return df[col] >= val
-            if op == "<=": return df[col] <= val
-            if op in ["=", "=="]: return df[col] == val
-            if op == "!=": return df[col] != val
         else:
-            series = df[col].astype(str).str.lower().str.strip()
+            series = series.astype(str).str.lower().str.strip()
             val = str(val).lower().strip()
-            if op in ["=", "=="]: return series == val
-            if op == "!=": return series != val
+
+        if op == ">": return series > val
+        if op == "<": return series < val
+        if op == ">=": return series >= val
+        if op == "<=": return series <= val
+        if op in ["=", "=="]: return series == val
+        if op == "!=": return series != val
 
     if op == "between":
-        low = float(val[0])
-        high = float(val[1])
-        return (df[col] >= low) & (df[col] <= high)
+        low, high = val
+        return (series >= float(low)) & (series <= float(high))
 
     return pd.Series([True] * len(df))
 
-# -----------------------------------
+# --------------------------------------------------
 # DERIVED COLUMN ENGINE
-# -----------------------------------
+# --------------------------------------------------
 def apply_new_columns(df, instructions):
-
-    for new_col in instructions.get("new_columns", []):
-        col_name = new_col.get("name")
+    for new_col in instructions:
+        name = new_col.get("name")
         rules = new_col.get("rules", [])
-
-        df[col_name] = ""
-
+        if not name:
+            continue
+        df[name] = ""
         for rule in rules:
             condition = rule.get("condition")
             value = rule.get("value")
-
             if condition == "otherwise":
-                df[col_name] = df[col_name].replace("", value)
+                df[name] = df[name].replace("", value)
             else:
-                mask = apply_conditions(df, condition)
-                df.loc[mask, col_name] = value
-
+                mask = apply_condition(df, condition)
+                df.loc[mask, name] = value
     return df
 
-# -----------------------------------
+# --------------------------------------------------
 # AGGREGATION ENGINE
-# -----------------------------------
+# --------------------------------------------------
 def apply_aggregation(df, agg):
+    if not agg:
+        return df
 
     group_col = match_column(df, agg.get("group_by"))
     agg_col = match_column(df, agg.get("column"))
@@ -186,42 +184,45 @@ def apply_aggregation(df, agg):
 
     return df
 
-# -----------------------------------
-# MAIN TRANSFORMATION ENGINE
-# -----------------------------------
-def apply_transformations(df, instructions):
+# --------------------------------------------------
+# TRANSFORMATION ORCHESTRATOR
+# --------------------------------------------------
+def transform(df, instructions):
 
     result = df.copy()
 
-    if "filter" in instructions:
-        mask = apply_conditions(result, instructions["filter"])
+    # FILTER
+    if instructions.get("filter"):
+        mask = apply_condition(result, instructions["filter"])
         result = result[mask]
 
-    if "new_columns" in instructions:
-        result = apply_new_columns(result, instructions)
+    # NEW COLUMNS
+    if instructions.get("new_columns"):
+        result = apply_new_columns(result, instructions["new_columns"])
 
-    if "aggregation" in instructions:
+    # AGGREGATION
+    if instructions.get("aggregation"):
         result = apply_aggregation(result, instructions["aggregation"])
 
     return result
 
-# -----------------------------------
+# --------------------------------------------------
 # TABS
-# -----------------------------------
+# --------------------------------------------------
 tab1, tab2 = st.tabs(["AI ETL Engine", "AI Jira Breakdown"])
 
-# ===================================
+# ==================================================
 # ETL TAB
-# ===================================
+# ==================================================
 with tab1:
 
     st.markdown('<div class="section-title">Business Description</div>', unsafe_allow_html=True)
-    etl_prompt = st.text_area("Describe data transformation", height=140)
-    uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
+    prompt = st.text_area("Describe transformation", height=150)
+    uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
 
     if st.button("Execute ETL"):
 
-        if not etl_prompt.strip() or not uploaded_file:
+        if not prompt.strip() or not uploaded_file:
             st.warning("Provide prompt and CSV.")
             st.stop()
 
@@ -229,39 +230,24 @@ with tab1:
         original_rows = len(df)
 
         system_prompt = f"""
+You are a strict JSON transformation engine.
+
 Return ONLY valid JSON.
 
-Structure:
+Structure MUST be:
 
 {{
-  "filter": {{
-    "logic": "AND",
-    "conditions": []
-  }},
-  "new_columns": [
-    {{
-      "name": "",
-      "rules": [
-        {{
-          "condition": {{"column":"Salary","operator":">=","value":80000}},
-          "value":"High"
-        }},
-        {{
-          "condition": "otherwise",
-          "value":"Low"
-        }}
-      ]
-    }}
-  ],
-  "aggregation": {{
-    "group_by": "",
-    "column": "",
-    "function": ""
-  }}
+ "filter": null,
+ "new_columns": [],
+ "aggregation": null
 }}
 
-Operators:
->, <, >=, <=, =, !=, between
+Rules:
+- Always include all 3 keys.
+- If unused → null or [].
+- Allowed operators: >, <, >=, <=, =, !=, between
+- between must use array [low, high]
+- No explanation text.
 
 Available Columns:
 {df.columns.tolist()}
@@ -271,20 +257,20 @@ Available Columns:
             model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": etl_prompt}
+                {"role": "user", "content": prompt}
             ],
-            temperature=0.0
+            temperature=0
         )
 
-        raw_output = response.choices[0].message.content
-        instructions = extract_json(raw_output)
+        raw = response.choices[0].message.content
+        instructions = safe_json_parse(raw)
 
-        if instructions is None:
+        if not instructions:
             st.error("AI returned invalid JSON.")
-            st.code(raw_output)
+            st.code(raw)
             st.stop()
 
-        result_df = apply_transformations(df, instructions)
+        result_df = transform(df, instructions)
 
         st.subheader("AI Instructions")
         st.json(instructions)
@@ -294,48 +280,47 @@ Available Columns:
 
         st.session_state.history.append({
             "Time": datetime.datetime.now(),
-            "Prompt": etl_prompt,
+            "Prompt": prompt,
             "Rows Before": original_rows,
             "Rows After": len(result_df)
         })
 
-# ===================================
+# ==================================================
 # JIRA TAB (UNCHANGED)
-# ===================================
+# ==================================================
 with tab2:
 
     st.markdown('<div class="section-title">Business Description</div>', unsafe_allow_html=True)
-    jira_prompt = st.text_area("Describe feature or initiative", height=140)
+    jira_prompt = st.text_area("Describe feature or initiative", height=150)
 
     if st.button("Generate Jira Breakdown"):
 
-        jira_system_prompt = """
+        jira_system = """
 You are a Senior Agile Delivery Manager.
+
 Generate:
 - 1 Epic
 - Multiple User Stories
 - Acceptance Criteria
 - Subtasks
-Return structured professional format.
+
+Professional structured format only.
 """
 
         response = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
-                {"role": "system", "content": jira_system_prompt},
+                {"role": "system", "content": jira_system},
                 {"role": "user", "content": jira_prompt}
             ],
             temperature=0.3
         )
 
-        jira_output = response.choices[0].message.content
+        st.markdown(response.choices[0].message.content)
 
-        st.subheader("Jira Breakdown")
-        st.markdown(jira_output)
-
-# ===================================
+# ==================================================
 # HISTORY
-# ===================================
+# ==================================================
 st.markdown("---")
 st.markdown('<div class="section-title">Transformation History</div>', unsafe_allow_html=True)
 
