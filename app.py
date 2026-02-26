@@ -777,7 +777,23 @@ with tab1:
 
         # ── RESULTS ──
         st.markdown('<div class="section-title">Transformed Output</div>', unsafe_allow_html=True)
-        st.dataframe(transformed_df, use_container_width=True)
+        total_rows = len(transformed_df)
+        col_info, col_select = st.columns([3, 1])
+        col_info.markdown(
+            f"<span style='font-size:13px;color:#666;'>Total records: <b>{total_rows:,}</b></span>",
+            unsafe_allow_html=True
+        )
+        display_options = [20, 50, 100, 500, 1000]
+        if total_rows <= 50000:
+            display_options.append(total_rows)
+        display_options = sorted(set(n for n in display_options if n <= total_rows)) or [total_rows]
+        display_n = col_select.selectbox(
+            "Show rows",
+            options=display_options,
+            index=0,
+            key="display_rows"
+        )
+        st.dataframe(transformed_df.head(display_n), use_container_width=True)
 
         # Audit log
         st.session_state.history.append({
