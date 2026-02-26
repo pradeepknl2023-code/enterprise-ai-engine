@@ -628,7 +628,7 @@ def render_jira_cards(data):
 # ============================================================
 # TABS
 # ============================================================
-tab1, tab2 = st.tabs(["⚡ AI ETL Engine", "📋 AI Jira Breakdown"])
+tab1, tab2, tab3 = st.tabs(["⚡ AI ETL Engine", "📋 AI Jira Breakdown", "🎬 Demo Video"])
 
 
 # ============================================================
@@ -989,6 +989,104 @@ with tab2:
             json.dumps(jira_data, indent=2),
             "jira_breakdown.json", "application/json"
         )
+
+
+
+
+# ============================================================
+# TAB 3 — DEMO VIDEO
+# ============================================================
+with tab3:
+    st.markdown('<div class="section-title">🎬 Platform Demo</div>', unsafe_allow_html=True)
+
+    # Info banner
+    st.markdown("""
+    <div style="background:linear-gradient(135deg,#B31B1B,#7a1212);border-radius:10px;
+                padding:20px 28px;margin-bottom:20px;box-shadow:0 4px 15px rgba(179,27,27,0.3);">
+        <div style="color:#FFC72C;font-family:'Rajdhani',sans-serif;font-size:22px;font-weight:700;">
+            ⚡ See the Platform in Action
+        </div>
+        <div style="color:rgba(255,255,255,0.85);font-size:13px;margin-top:8px;line-height:1.7;">
+            This short demo walks through both tools — the AI ETL Engine and AI Jira Breakdown —
+            showing real-time execution flow, record counts, card-based outputs and export options.
+        </div>
+        <div style="display:flex;gap:12px;margin-top:14px;flex-wrap:wrap;">
+            <span style="background:rgba(255,199,44,0.2);border:1px solid rgba(255,199,44,0.5);
+                         color:#FFC72C;padding:3px 12px;border-radius:12px;font-size:12px;font-weight:600;">
+                ⏱ ~30 seconds
+            </span>
+            <span style="background:rgba(255,199,44,0.2);border:1px solid rgba(255,199,44,0.5);
+                         color:#FFC72C;padding:3px 12px;border-radius:12px;font-size:12px;font-weight:600;">
+                📊 5 Feature Walkthroughs
+            </span>
+            <span style="background:rgba(255,199,44,0.2);border:1px solid rgba(255,199,44,0.5);
+                         color:#FFC72C;padding:3px 12px;border-radius:12px;font-size:12px;font-weight:600;">
+                🎬 HD 1280×720
+            </span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── VIDEO PLAYER ──
+    # Place your demo video file as: assets/enterprise_ai_demo.mp4
+    # Then it will auto-play here. Instructions below if not yet uploaded.
+    import os, base64
+
+    video_path = "assets/enterprise_ai_demo.mp4"
+    if os.path.exists(video_path):
+        with open(video_path, "rb") as vf:
+            video_bytes = vf.read()
+        st.video(video_bytes)
+    else:
+        st.markdown("""
+        <div style="background:#1a1a2e;border:2px dashed #B31B1B;border-radius:10px;
+                    padding:40px;text-align:center;margin:20px 0;">
+            <div style="font-size:48px;">🎬</div>
+            <div style="color:#FFC72C;font-size:18px;font-weight:700;margin:12px 0;">
+                Demo Video Not Found
+            </div>
+            <div style="color:#888;font-size:13px;line-height:1.7;">
+                Place <code style="background:#111;padding:2px 6px;border-radius:4px;color:#29B6F6;">
+                enterprise_ai_demo.mp4</code> inside an
+                <code style="background:#111;padding:2px 6px;border-radius:4px;color:#29B6F6;">
+                assets/</code> folder in your GitHub repo root.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # ── FEATURE WALKTHROUGH CARDS ──
+    st.markdown('<div class="section-title">📋 Whats Covered in the Demo</div>', unsafe_allow_html=True)
+
+    features = [
+        ("01", "⚡", "Real-time ETL Execution Flow",
+         "Watch the Abinitio GDE-style pipeline animate through 3 stages: Reading → Transforming → Done. Record counts update live as data flows through each node."),
+        ("02", "📂", "Multi-file Upload & Auto JOIN",
+         "Upload one or multiple CSVs. The engine auto-detects joins, assigns aliases (df1, df2), and generates optimised pandas code via LLaMA 3.3 70B."),
+        ("03", "📊", "Pipeline Summary & Metrics",
+         "After execution: files processed, rows in/out, new columns created, joins applied — all in a clean metrics dashboard with plain-English step log."),
+        ("04", "📋", "AI Jira Breakdown by Project Type",
+         "Select your project type (ETL, Web, Mobile, API, Cloud, Security, AI/ML), configure your team, and get a full Epic + Stories + Gherkin AC + Subtasks in seconds."),
+        ("05", "💾", "Export in 5 Formats",
+         "ETL results as CSV or Excel (with audit log). Jira output as Excel (multi-sheet), TXT, or JSON — ready to import directly into Jira or any ticket system."),
+    ]
+
+    for step, icon, title, desc in features:
+        st.markdown(f"""
+        <div style="background:white;border:1px solid #E8E8E8;border-left:4px solid #B31B1B;
+                    border-radius:8px;padding:16px 20px;margin:8px 0;
+                    box-shadow:0 2px 8px rgba(0,0,0,0.06);">
+            <div style="display:flex;align-items:center;gap:14px;">
+                <div style="background:#B31B1B;color:white;border-radius:50%;
+                            width:34px;height:34px;display:flex;align-items:center;
+                            justify-content:center;font-size:13px;font-weight:700;
+                            min-width:34px;">{step}</div>
+                <div style="font-size:22px;">{icon}</div>
+                <div>
+                    <div style="font-size:14px;font-weight:700;color:#1a1a1a;">{title}</div>
+                    <div style="font-size:12px;color:#555;margin-top:3px;line-height:1.5;">{desc}</div>
+                </div>
+            </div>
+        </div>""", unsafe_allow_html=True)
 
 
 # ============================================================
