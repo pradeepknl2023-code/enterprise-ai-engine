@@ -275,28 +275,16 @@ st.markdown("""
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 2px;
-    padding: 0 4px;
+    justify-content: center;
+    gap: 4px;
+    padding: 0 6px;
+    min-width: 70px;
 }
-.gde-line {
-    height: 2px;
-    width: 50px;
-    background: linear-gradient(90deg, #1E90FF, #00C853);
-}
-.gde-line.done {
-    background: linear-gradient(90deg, #29B6F6, #29B6F6);
-}
-.gde-arrowhead {
-    font-size: 14px;
-    color: #00C853;
-    margin-left: 46px;
-    margin-top: -10px;
-}
-.gde-arrowhead.done { color: #29B6F6; }
 .gde-count-label {
     font-size: 10px;
-    color: #555;
+    color: #666;
     white-space: nowrap;
+    text-align: center;
 }
 /* Legend */
 .gde-legend {
@@ -334,7 +322,7 @@ st.markdown("""
 st.markdown("""
 <div class="main-header">
     <div>
-        <div class="header-sub">POWERED BY GROQ · LLAMA 3.3 · PANDAS</div>
+        <div class="header-sub">AI POWERED &nbsp;·&nbsp; LLAMA 3.3 &nbsp;·&nbsp; PANDAS</div>
         <h1>⚡ Enterprise AI Transformation &amp; Delivery Platform</h1>
     </div>
     <div class="version-badge">v2.0</div>
@@ -407,12 +395,21 @@ def render_gde_flow(dataframes: dict, file_names: list, code: str,
         </div>"""
 
     def arrow(label="", done=False):
-        cls = "done" if done else ""
+        stroke = "#29B6F6" if done else "#00C853"
         return f"""
         <div class="gde-arrow">
-            <div class="gde-line {cls}"></div>
-            <div class="gde-arrowhead {cls}">▶</div>
-            <div class="gde-count-label">{label}</div>
+            <svg width="70" height="18" viewBox="0 0 70 18" xmlns="http://www.w3.org/2000/svg">
+                <defs>
+                    <marker id="arrowhead{'_done' if done else '_run'}" markerWidth="6" markerHeight="6"
+                        refX="5" refY="3" orient="auto">
+                        <polygon points="0 0, 6 3, 0 6" fill="{stroke}" />
+                    </marker>
+                </defs>
+                <line x1="2" y1="9" x2="62" y2="9"
+                    stroke="{stroke}" stroke-width="2"
+                    marker-end="url(#arrowhead{'_done' if done else '_run'})" />
+            </svg>
+            <div class="gde-count-label" style="color:{stroke};">{label}</div>
         </div>"""
 
     def transform_node(label, sub, rows_in, state):
