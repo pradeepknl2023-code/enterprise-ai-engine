@@ -1,7 +1,10 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import os
 import re
+import math
+import string
 import datetime
 from groq import Groq
 from io import BytesIO
@@ -12,7 +15,7 @@ from io import BytesIO
 st.set_page_config(page_title="Enterprise AI Platform", layout="wide")
 
 # -----------------------------------
-# ENTERPRISE THEME
+# ENTERPRISE THEME  (unchanged)
 # -----------------------------------
 st.markdown("""
 <style>
@@ -46,7 +49,7 @@ st.markdown("""
 
 st.markdown("""
 <div class="main-header">
-<h1>Enterprise AI Transformation & Delivery Platform</h1>
+<h1>Enterprise AI Transformation &amp; Delivery Platform</h1>
 </div>
 """, unsafe_allow_html=True)
 
@@ -65,40 +68,75 @@ client = Groq(api_key=GROQ_API_KEY)
 if "history" not in st.session_state:
     st.session_state.history = []
 
-# -----------------------------------
-# SAFE EXECUTION FUNCTION (Multi-DF)
-# -----------------------------------
-def safe_exec_multi(dataframes: dict, code: str):
-    """
-    Executes AI-generated code safely with multiple DataFrames.
-    dataframes: dict of {alias: df}, e.g. {"df1": df1, "df2": df2, "df": df1}
-    Returns the resulting 'df' from local_env after execution.
-    """
-    # Strip markdown fences
-    code = re.sub(r"```(?:python)?", "", code)
-    code = re.sub(r"```", "", code)
-    code = code.strip()
 
-    local_env = {**dataframes, "pd": pd}
+# ============================================================
+# UTILITY: strip markdown fences from AI-generated code
+# ============================================================
+def extract_code(raw: str) -> str:
+    """
+    Pull the Python code out of whatever the model returns.
+    Handles ```python ... ```, ``` ... ```, and plain text.
+    """
+    fenced = re.search(r"```(?:python)?\s*\n(.*?)```", raw, re.DOTALL)
+    if fenced:
+        return fenced.group(1).strip()
+    lines = [ln for ln in raw.splitlines() if not ln.strip().startswith("```")]
+    return "\n".join(lines).strip()
+
+
+# ============================================================
+# EXECUTION ENGINE
+# ============================================================
+def safe_exec_multi(dataframes: dict, code: str) -> pd.DataFrame:
+    """
+    Execute AI-generated pandas code.
+
+    Uses globals() as the execution namespace so every module already
+    imported at the top of this file (pd, np, re, math, string, datetime)
+    is automatically available — no more 'name X is not defined' errors.
+    The AI can also use bare `import` statements for any installed package.
+    Dataframe aliases (df / df1 / df2 ...) are overlaid on top.
+
+    Output resolution: 'result' -> primary alias -> first dataframe.
+    Raises RuntimeError on failure so the caller can retry.
+    """
+    code = extract_code(code)
+
+    exec_globals = {
+        **globals(),   # pd, np, re, math, string, datetime, BytesIO ...
+        **dataframes,  # df  /  df1, df2, df3 ...
+    }
+
     try:
-        exec(code, {}, local_env)
-    except Exception as e:
-        st.warning(f"Failed executing AI code: {e}")
-        # Return the primary df unchanged
-        return dataframes.get("df", list(dataframes.values())[0])
+        exec(compile(code, "<ai_etl>", "exec"), exec_globals)
+    except Exception as exc:
+        raise RuntimeError(f"Failed executing AI code: {exc}\n\nCode:\n{code}") from exc
 
-    # Prefer 'result' then 'df', else first df value
-    return local_env.get("result", local_env.get("df", list(dataframes.values())[0]))
+    primary = "df" if "df" in dataframes else list(dataframes.keys())[0]
+    output = exec_globals.get(
+        "result",
+        exec_globals.get(primary, list(dataframes.values())[0])
+    )
+
+    if not isinstance(output, pd.DataFrame):
+        raise RuntimeError(
+            f"AI code produced {type(output).__name__} instead of a DataFrame."
+        )
+    return output
 
 
-# -----------------------------------
-# BUILD SYSTEM PROMPT FOR ETL
-# -----------------------------------
+# ============================================================
+# SYSTEM PROMPT BUILDER
+# ============================================================
 def build_system_prompt(dataframes: dict) -> str:
-    """Build a rich system prompt showing all uploaded dataframe schemas."""
-    schema_info = ""
+    """Dynamically build a rich system prompt with schema + dtypes + join examples."""
+    schema_lines = ""
     for alias, df in dataframes.items():
-        schema_info += f"\n  {alias}: columns={df.columns.tolist()}, shape={df.shape}"
+        dtypes = {c: str(t) for c, t in df.dtypes.items()}
+        schema_lines += (
+            f"\n  {alias}: columns={df.columns.tolist()}, "
+            f"dtypes={dtypes}, shape={df.shape}"
+        )
 
     aliases = list(dataframes.keys())
     primary = aliases[0] if aliases else "df"
@@ -106,70 +144,80 @@ def build_system_prompt(dataframes: dict) -> str:
     join_examples = ""
     if len(aliases) >= 2:
         a, b = aliases[0], aliases[1]
-        # Find common columns for example
         common = list(set(dataframes[a].columns) & set(dataframes[b].columns))
-        join_col = common[0] if common else "id"
+        jcol = common[0] if common else "id"
         join_examples = f"""
-# Example: Inner join {a} and {b} on '{join_col}'
-result = pd.merge({a}, {b}, on='{join_col}', how='inner')
-
-# Example: Left join
-result = pd.merge({a}, {b}, on='{join_col}', how='left')
-
-# Example: Join on different column names
+# Join examples ({a} + {b}):
+result = pd.merge({a}, {b}, on='{jcol}', how='inner')
+result = pd.merge({a}, {b}, on='{jcol}', how='left')
 result = pd.merge({a}, {b}, left_on='emp_id', right_on='employee_id', how='inner')
-
-# Example: Multi-key join
-result = pd.merge({a}, {b}, on=['{join_col}'], how='inner')
+result = pd.merge({a}, {b}, on=['{jcol}', 'DEPT'], how='inner')
 """
 
-    return f"""
-You are a Senior Enterprise Data Engineer. Follow these rules STRICTLY:
+    return f"""You are a Senior Enterprise Data Engineer. Follow every rule below.
 
-AVAILABLE DATAFRAMES:{schema_info}
+AVAILABLE DATAFRAMES:{schema_lines}
 
-PRIMARY DATAFRAME: '{primary}' (use as default if no join is needed)
+PRIMARY DATAFRAME: '{primary}'
 
 RULES:
-- Use ONLY the available dataframe aliases above.
-- For single-file operations, modify '{primary}' and store result in 'result' or '{primary}'.
-- For joins/merges, use pd.merge() and store result in 'result'.
-- Handle nulls using fillna("").
-- Strip spaces using .str.strip().
-- Compare strings using .str.lower().
-- Use vectorized pandas operations only — no row loops.
-- Do NOT include explanations, markdown fences, or comments.
-- Return ONLY executable Python code.
-- Apply exact filters requested (e.g., Salary > 75000, Department = IT).
-- Ensure numeric filters and string equality are applied correctly.
-- Always assign final output to 'result'.
+1. Use ONLY the dataframe aliases listed above.
+2. Store the final output in a variable named 'result'.
+3. You MAY write `import` statements for any standard Python module (re, math, string, etc.).
+4. Handle nulls: .fillna("") for strings, .fillna(0) for numerics.
+5. Strip whitespace: .str.strip() before string comparisons.
+6. String equality: .str.strip().str.lower() == "value".
+7. Use vectorised pandas operations — never iterate rows with loops.
+8. Do NOT output any explanation, markdown fences, or comments.
+9. Return ONLY executable Python code.
+10. Apply exact filters from the prompt (Salary > 75000, Department = IT, etc.).
+11. Cast numeric columns where needed: pd.to_numeric(..., errors='coerce').
 
 FEW-SHOT EXAMPLES:
 
-# Example 1 — Filter single file:
-result = {primary}[{primary}['Salary'] > 70000]
+# Filter by salary
+result = {primary}[{primary}['SALARY'] > 70000]
 
-# Example 2 — String filter:
-result = {primary}[{primary}['Department'].str.strip().str.lower() == "it"]
+# String filter
+result = {primary}[{primary}['DEPARTMENT'].str.strip().str.lower() == "it"]
 
-# Example 3 — Combined filter:
-result = {primary}[({primary}['Salary'] >= 80000) & ({primary}['Department'].str.strip().str.lower() == "finance")]
-{join_examples}
-# Example 4 — Add computed column then filter:
-df_temp = {primary}.copy()
-df_temp['FullName'] = df_temp['FirstName'].str.strip() + ' ' + df_temp['LastName'].str.strip()
-result = df_temp[df_temp['Salary'] > 60000]
-"""
+# Combined filter
+result = {primary}[
+    ({primary}['SALARY'] >= 80000) &
+    ({primary}['DEPARTMENT'].str.strip().str.lower() == "finance")
+]
+
+# Regex phone cleaning
+import re
+df_tmp = {primary}.copy()
+df_tmp['PHONE_CLEAN'] = df_tmp['PHONE_NUMBER'].apply(lambda x: re.sub(r'[^0-9]', '', str(x)))
+result = df_tmp
+
+# Dense rank within group
+df_tmp = {primary}.copy()
+df_tmp['RANK'] = df_tmp.groupby('DEPARTMENT_ID')['SALARY'].rank(method='dense', ascending=False)
+result = df_tmp
+
+# Salary grade buckets
+df_tmp = {primary}.copy()
+df_tmp['GRADE'] = pd.cut(
+    df_tmp['SALARY'],
+    bins=[0, 10000, 20000, float('inf')],
+    labels=['LOW', 'MEDIUM', 'HIGH']
+)
+result = df_tmp
+{join_examples}"""
 
 
-# -----------------------------------
-# TABS
-# -----------------------------------
+# ============================================================
+# TABS  (structure unchanged)
+# ============================================================
 tab1, tab2 = st.tabs(["AI ETL Engine", "AI Jira Breakdown"])
 
-# ===================================
-# ========== AI ETL TAB =============
-# ===================================
+
+# ============================================================
+# TAB 1 — AI ETL ENGINE
+# ============================================================
 with tab1:
     st.markdown('<div class="section-title">Business Description</div>', unsafe_allow_html=True)
     etl_prompt = st.text_area("Describe data transformation", key="etl_prompt", height=140)
@@ -178,118 +226,142 @@ with tab1:
         "Upload CSV File(s) — upload multiple files to enable joins",
         type=["csv"],
         accept_multiple_files=True,
-        key="etl_upload"
+        key="etl_upload",
     )
 
-    # Preview uploaded files and show schema info
+    # ---- Live schema preview ----
     if uploaded_files:
         st.markdown('<div class="section-title">Uploaded Files Preview</div>', unsafe_allow_html=True)
-        dataframes = {}
+        _preview_dfs = {}
         for i, f in enumerate(uploaded_files):
             alias = f"df{i+1}" if len(uploaded_files) > 1 else "df"
-            df_temp = pd.read_csv(f)
-            dataframes[alias] = df_temp
-            with st.expander(f"📄 {f.name}  →  alias: `{alias}`  |  {df_temp.shape[0]} rows × {df_temp.shape[1]} cols"):
-                st.dataframe(df_temp.head(5), use_container_width=True)
+            _df = pd.read_csv(f)
+            _preview_dfs[alias] = _df
+            with st.expander(
+                f"📄 {f.name}  →  alias: `{alias}`  |  "
+                f"{_df.shape[0]:,} rows × {_df.shape[1]} cols"
+            ):
+                st.dataframe(_df.head(5), use_container_width=True)
 
         if len(uploaded_files) > 1:
             st.info(
                 f"**{len(uploaded_files)} files loaded.** "
-                f"Reference them as: {', '.join(f'`{a}`' for a in dataframes)}. "
-                "You can describe joins in plain English, e.g. *'Join df1 and df2 on EmployeeID and filter Salary > 70000'*."
+                f"Reference them as: {', '.join(f'`{a}`' for a in _preview_dfs)}. "
+                "Describe joins in plain English — e.g. "
+                "*'Join df1 and df2 on EMPLOYEE_ID and show employees with SALARY > 70000'*."
             )
 
+    # ---- Execute button ----
     if st.button("Execute ETL"):
         if not etl_prompt.strip():
-            st.warning("Enter transformation description.")
+            st.warning("Enter a transformation description.")
             st.stop()
         if not uploaded_files:
             st.warning("Upload at least one CSV file.")
             st.stop()
 
-        # Build dataframes dict
+        # Reload (seek to start after preview already read the files)
         dataframes = {}
         for i, f in enumerate(uploaded_files):
             f.seek(0)
             alias = f"df{i+1}" if len(uploaded_files) > 1 else "df"
             dataframes[alias] = pd.read_csv(f)
 
-        # For single file keep backward compat alias 'df'
+        # Single-file backward-compat: also expose as 'df'
         if len(uploaded_files) == 1:
             dataframes["df"] = list(dataframes.values())[0]
 
         primary_alias = "df" if len(uploaded_files) == 1 else "df1"
-        original_rows = dataframes.get(primary_alias, list(dataframes.values())[0]).shape[0]
-
+        original_rows = dataframes[primary_alias].shape[0]
         system_prompt = build_system_prompt(dataframes)
 
-        def generate_code(error=None):
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": etl_prompt}
-            ]
-            if error:
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        f"The previous code caused this error: {error}\n"
-                        "Please fix the code. Return only executable Python. "
-                        "Store final result in 'result'."
-                    )
-                })
-            response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=messages,
-                temperature=0.1
-            )
-            return response.choices[0].message.content
-
+        # ---- 3-attempt self-healing execution loop ----
+        MAX_ATTEMPTS = 3
         ai_code = ""
         transformed_df = None
-        try:
-            ai_code = generate_code()
-            transformed_df = safe_exec_multi(dataframes, ai_code)
-        except Exception as e:
-            st.warning(f"First attempt failed ({e}), retrying with error context...")
+        last_error = None
+
+        # Running conversation — each retry appends previous code + error
+        conversation = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": etl_prompt},
+        ]
+
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            if last_error and attempt > 1:
+                conversation.append({"role": "assistant", "content": ai_code})
+                conversation.append({
+                    "role": "user",
+                    "content": (
+                        f"Attempt {attempt - 1} raised this error:\n{last_error}\n\n"
+                        "Fix the code. Rules reminder:\n"
+                        "  - NO markdown fences.\n"
+                        "  - You MAY use `import` for any needed module.\n"
+                        "  - Store final DataFrame in 'result'.\n"
+                        "  - Do NOT redefine pd or the dataframe aliases."
+                    ),
+                })
+
+            response = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=conversation,
+                temperature=0.1,
+            )
+            ai_code = response.choices[0].message.content
+
             try:
-                ai_code = generate_code(error=str(e))
                 transformed_df = safe_exec_multi(dataframes, ai_code)
-            except Exception as e2:
-                st.error(f"ETL failed after retry: {e2}")
-                transformed_df = list(dataframes.values())[0].copy()
+                last_error = None
+                break  # success
+            except Exception as exc:
+                last_error = str(exc)
+                if attempt < MAX_ATTEMPTS:
+                    st.warning(f"⚠️ Attempt {attempt} failed — self-healing... (`{exc}`)")
+                else:
+                    st.error(f"ETL failed after {MAX_ATTEMPTS} attempts.\n\nLast error:\n{exc}")
+                    transformed_df = list(dataframes.values())[0].copy()
+        # ---- end retry loop ----
 
         st.subheader("Generated Code")
-        st.code(ai_code, language="python")
+        st.code(extract_code(ai_code), language="python")
 
         st.subheader("Transformed Output")
         st.dataframe(transformed_df, use_container_width=True)
 
-        # Save history
+        # Audit log
         st.session_state.history.append({
-            "Time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "Prompt": etl_prompt,
-            "Files": ", ".join(f.name for f in uploaded_files),
+            "Time":        datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "Prompt":      etl_prompt,
+            "Files":       ", ".join(f.name for f in uploaded_files),
             "Rows Before": original_rows,
-            "Rows After": len(transformed_df)
+            "Rows After":  len(transformed_df),
+            "Status":      "OK" if last_error is None else "FAILED",
         })
 
-        # Export
+        # ---- Export ----
         st.markdown('<div class="section-title">Export Results</div>', unsafe_allow_html=True)
         col1, col2 = st.columns(2)
-        csv_data = transformed_df.to_csv(index=False).encode("utf-8")
-        col1.download_button("Download CSV", csv_data, "etl_output.csv", "text/csv")
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+
+        csv_bytes = transformed_df.to_csv(index=False).encode("utf-8")
+        col1.download_button("Download CSV", csv_bytes, "etl_output.csv", "text/csv")
+
+        xlsx_buf = BytesIO()
+        with pd.ExcelWriter(xlsx_buf, engine="xlsxwriter") as writer:
             transformed_df.to_excel(writer, sheet_name="Transformed_Data", index=False)
-            pd.DataFrame(st.session_state.history).to_excel(writer, sheet_name="Audit_Log", index=False)
+            pd.DataFrame(st.session_state.history).to_excel(
+                writer, sheet_name="Audit_Log", index=False
+            )
         col2.download_button(
-            "Download Excel", output.getvalue(), "etl_output.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            "Download Excel",
+            xlsx_buf.getvalue(),
+            "etl_output.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-# ===================================
-# ========== JIRA TAB ==============
-# ===================================
+
+# ============================================================
+# TAB 2 — AI JIRA BREAKDOWN  (completely unchanged)
+# ============================================================
 with tab2:
     st.markdown('<div class="section-title">Business Description</div>', unsafe_allow_html=True)
     jira_prompt = st.text_area("Describe feature or initiative", key="jira_prompt", height=140)
@@ -312,32 +384,37 @@ Return structured professional format.
                 model="llama-3.1-8b-instant",
                 messages=[
                     {"role": "system", "content": jira_system_prompt},
-                    {"role": "user", "content": jira_prompt}
+                    {"role": "user",   "content": jira_prompt},
                 ],
-                temperature=0.3
+                temperature=0.3,
             )
             jira_output = response.choices[0].message.content
 
         st.subheader("Jira Breakdown")
         st.markdown(jira_output)
+
         st.markdown('<div class="section-title">Export Jira Output</div>', unsafe_allow_html=True)
         col1, col2 = st.columns(2)
         col1.download_button("Download as TXT", jira_output, "jira_breakdown.txt", "text/plain")
+
         jira_df = pd.DataFrame({"Jira Breakdown": [jira_output]})
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        jira_buf = BytesIO()
+        with pd.ExcelWriter(jira_buf, engine="xlsxwriter") as writer:
             jira_df.to_excel(writer, sheet_name="Jira_Output", index=False)
         col2.download_button(
-            "Download as Excel", output.getvalue(), "jira_breakdown.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            "Download as Excel",
+            jira_buf.getvalue(),
+            "jira_breakdown.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-# ===================================
+
+# ============================================================
 # HISTORY PANEL
-# ===================================
+# ============================================================
 st.markdown("---")
 st.markdown('<div class="section-title">Transformation History</div>', unsafe_allow_html=True)
 if st.session_state.history:
-    st.dataframe(pd.DataFrame(st.session_state.history))
+    st.dataframe(pd.DataFrame(st.session_state.history), use_container_width=True)
 else:
     st.info("No transformations executed yet.")
