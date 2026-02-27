@@ -211,7 +211,7 @@ def call_ai(messages: list, temperature: float = 0.1, max_tokens: int = 2000,
     task=summary → llama-3.1-8b-instant (400 tokens, separate quota)
     task=jira    → llama-3.3-70b-versatile (3,000 tokens)
     """
-    token_limit = {"code": 1600, "summary": 400, "jira": 3000}.get(task, max_tokens)
+    token_limit = {"code": 1000, "summary": 300, "jira": 2500}.get(task, max_tokens)
 
     # ── summary / jira: single model, one retry ──────────────────────────
     if task in ("summary", "jira"):
@@ -411,9 +411,11 @@ def build_system_prompt_secure(dataframes: dict) -> str:
         join_examples = f"\n# Example multi-file join:\nresult = pd.merge({a}, {b}, on='{jcol}', how='inner')"
 
     today = datetime.datetime.now().strftime("%Y-%m-%d")
-    return f"""You are an expert data engineer. Today={today}.
-DATAFRAMES (column:dtype):{schema_context}
-RULES: Use only listed aliases. Output assigned to 'result'. pd/np/re/datetime pre-imported. Use pd.Timestamp('{today}') for date math. No markdown. No explanations. Vectorised ops only. fillna(0) after joins. np.select() for conditionals. Store final DataFrame in 'result'.{join_examples}"""
+    aliases = list(dataframes.keys())
+    alias_str = ", ".join(aliases)
+    return f"""Expert data engineer. Today={today}. DataFrames: {alias_str}.
+Schema:{schema_context}
+Write Python only. Store result in 'result'. pd/np/datetime available. pd.Timestamp('{today}') for dates. fillna(0) after joins. np.select() for conditions. No markdown."""
 
 
 def make_gde_html(dataframes, file_names, code, result_df, state,
@@ -905,7 +907,19 @@ with tab1:
     with run_col:
         run_btn = st.button("▶ Execute ETL", key="run_etl", use_container_width=True)
     with hint_col:
-        st.markdown("<div style='font-size:11px;color:#888;padding-top:10px;'>Auto-retries on rate limits. Supports multi-file joins, aggregations, date windows, risk scoring, segmentation, pivots, and more.</div>", unsafe_allow_html=True)
+        n_files = len(uploaded_files) if uploaded_files else 0
+        prompt_len = len(etl_prompt_raw.split()) if etl_prompt_raw else 0
+        est_tokens = 150 + prompt_len * 1.3 + 1000  # schema + prompt + output
+        quota_pct = min(int(est_tokens / 60), 100)
+        bar_color = "#2E7D32" if quota_pct < 50 else ("#E65100" if quota_pct < 80 else "#B31B1B")
+        st.markdown(f"""
+<div style='font-size:11px;color:#888;padding-top:6px;'>
+  Estimated tokens: <b style='color:{bar_color};'>~{int(est_tokens):,}</b> of 6,000/min quota
+  &nbsp;·&nbsp; Files: {n_files} &nbsp;·&nbsp; Auto-cooldown on limit
+  <div style='background:#eee;border-radius:4px;height:4px;margin-top:4px;'>
+    <div style='background:{bar_color};width:{quota_pct}%;height:4px;border-radius:4px;'></div>
+  </div>
+</div>""", unsafe_allow_html=True)
 
     if run_btn:
         if not etl_prompt_raw.strip():
@@ -963,7 +977,7 @@ with tab1:
         time.sleep(0.4)
         gde_slot.markdown(make_gde_html(dataframes_original, file_names, "", None, "transforming", masked_cols=all_masked_cols), unsafe_allow_html=True)
 
-        MAX_ATTEMPTS = 3
+        MAX_ATTEMPTS = 2
         ai_code = ""
         transformed_df = None
         last_error = None
@@ -982,19 +996,31 @@ with tab1:
 
                 # Check for rate limit sentinel BEFORE trying to execute
                 if ai_code == RATE_LIMIT_SENTINEL:
-                    st.error("""
-### ⏱️ Groq Rate Limit Reached
+                    st.error("⏱️ Groq rate limit hit across all model tiers. Auto-cooling down...")
+                    # Countdown timer — resets quota window
+                    progress = st.progress(0, text="⏳ Cooling down... 60s remaining")
+                    for i in range(60):
+                        time.sleep(1)
+                        remaining = 60 - i - 1
+                        pct = (i + 1) / 60
+                        progress.progress(pct, text=f"⏳ Cooling down... {remaining}s remaining")
+                    progress.progress(1.0, text="✅ Quota reset — retrying now...")
+                    time.sleep(0.5)
+                    # Auto-retry once after cooldown
+                    ai_code = call_ai(conversation, temperature=0.05, task="code")
+                    if ai_code == RATE_LIMIT_SENTINEL:
+                        st.error("""
+### ⏱️ Still Rate Limited After Cooldown
 
-The AI API quota was exhausted after automatic retries.
+Groq's free tier quota is shared across all calls (6,000 tokens/min).
+Heavy concurrent usage on Groq's infrastructure can extend limits.
 
-**To fix this:**
-- ⏳ Wait **60 seconds**, then click **▶ Execute ETL** again
-- 💡 Try a **simpler prompt** (see examples above) — they use fewer tokens
-- 🔑 Use a **Groq paid tier** key for higher limits in production
-
-*The app automatically retried with backoff — this means the limit was sustained.*
+**Options:**
+- 🔑 **Groq paid tier** removes this limit entirely
+- ⏳ Wait another 60 seconds and retry manually
+- 💡 Use a **simpler prompt** — Single-file queries use 3× fewer tokens
 """)
-                    st.stop()
+                        st.stop()
 
                 try:
                     transformed_df = safe_exec_multi(dataframes_original, ai_code)
