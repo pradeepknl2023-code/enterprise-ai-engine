@@ -1,23 +1,23 @@
 """
-ai_router.py  ·  LiteLLM Multi-Provider Router  ·  v2.0
+ai_router.py  ·  LiteLLM Multi-Provider Router  ·  v2.1
 =========================================================
-RECOMMENDED SETUP (zero cost):
-  1. Get Gemini key free → https://aistudio.google.com
-  2. Add to .streamlit/secrets.toml:
-       GEMINI_API_KEY = "AIza..."
-  3. Done. 1,000,000 tokens/min free. No rate limits in practice.
+FIXES in v2.1:
+  - os.environ sync handled externally (app.py does it at startup)
+  - Cleaner error classification
+  - Better logging for debugging
 
 PROVIDER PRIORITY (auto-detected from available keys):
-  Tier 1 — Gemini 2.0 Flash    (FREE · 1M TPM  · quality ★★★★)  ← PRIMARY
-  Tier 2 — Gemini 1.5 Flash    (FREE · 1M TPM  · quality ★★★★)  ← BACKUP
-  Tier 3 — Groq Llama-3.3-70b  (FREE · 6k TPM  · quality ★★★★)  ← YOUR EXISTING KEY
-  Tier 4 — Groq DeepSeek-R1    (FREE · 6k TPM  · quality ★★★★)
-  Tier 5 — Groq Llama3-70b     (FREE · 6k TPM  · quality ★★★)
-  Tier 6 — Groq Gemma2-9b      (FREE · 15k TPM · quality ★★★)
-  Tier 7 — Mistral Small       (FREE tier       · quality ★★★)
-  Tier 8 — GPT-4o-mini         (PAID · cheapest · quality ★★★★)
-  Tier 9 — Claude Sonnet       (PAID · best ETL · quality ★★★★★)
-  Tier 10— Ollama local        (FREE · offline  · quality ★★★)
+  Tier 1 — Gemini 2.0 Flash    (FREE · 1M TPM)   ← PRIMARY
+  Tier 2 — Gemini 1.5 Flash    (FREE · 1M TPM)   ← BACKUP
+  Tier 3 — Groq Llama-3.3-70b  (FREE · 6k TPM)   ← YOUR EXISTING KEY
+  Tier 4 — Groq DeepSeek-R1    (FREE · 6k TPM)
+  Tier 5 — Groq Llama3-70b     (FREE · 6k TPM)
+  Tier 6 — Groq Gemma2-9b      (FREE · 15k TPM)
+  Tier 7 — Mistral Small       (FREE tier)
+  Tier 8 — GPT-4o-mini         (PAID · cheapest)
+  Tier 9 — GPT-4o              (PAID · best)
+  Tier 10 — Claude Sonnet      (PAID · best ETL)
+  Tier 11 — Ollama local       (FREE · offline)
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ ALL_MODELS: list[ModelConfig] = [
         provider="Google Gemini 1.5 Flash",
     ),
 
-    # ── FREE — Groq FALLBACK (6k–15k TPM) ───────────────────
+    # ── FREE — Groq FALLBACK ─────────────────────────────────
     ModelConfig(
         model="groq/llama-3.3-70b-versatile",
         env_key="GROQ_API_KEY",
@@ -106,7 +106,7 @@ ALL_MODELS: list[ModelConfig] = [
         task_types=["code", "summary"],
     ),
 
-    # ── PAID — OpenAI (optional upgrade) ────────────────────
+    # ── PAID — OpenAI ────────────────────────────────────────
     ModelConfig(
         model="gpt-4o-mini",
         env_key="OPENAI_API_KEY",
@@ -122,7 +122,7 @@ ALL_MODELS: list[ModelConfig] = [
         provider="OpenAI · GPT-4o",
     ),
 
-    # ── PAID — Anthropic (optional upgrade) ─────────────────
+    # ── PAID — Anthropic ─────────────────────────────────────
     ModelConfig(
         model="claude-3-5-sonnet-20241022",
         env_key="ANTHROPIC_API_KEY",
@@ -131,7 +131,7 @@ ALL_MODELS: list[ModelConfig] = [
         provider="Anthropic · Claude Sonnet",
     ),
 
-    # ── LOCAL — Ollama (zero cost, zero egress) ──────────────
+    # ── LOCAL — Ollama ───────────────────────────────────────
     ModelConfig(
         model="ollama/codellama",
         env_key="",
@@ -166,7 +166,7 @@ def _st(model: str) -> _ModelStatus:
 
 
 # ─────────────────────────────────────────────────────────────
-# AVAILABILITY
+# AVAILABILITY CHECK
 # ─────────────────────────────────────────────────────────────
 def _is_available(cfg: ModelConfig) -> bool:
     s = _st(cfg.model)
@@ -174,9 +174,10 @@ def _is_available(cfg: ModelConfig) -> bool:
         return False
     if time.time() < s.rate_limited_until:
         return False
-    if cfg.env_key and not os.getenv(cfg.env_key, ""):
+    # Key check — reads from os.environ (synced from st.secrets in app.py)
+    if cfg.env_key and not os.environ.get(cfg.env_key, "").strip():
         return False
-    if "ollama" in cfg.model and not os.getenv("OLLAMA_ENABLED", ""):
+    if "ollama" in cfg.model and not os.environ.get("OLLAMA_ENABLED", "").strip():
         return False
     return True
 
@@ -232,10 +233,6 @@ def call_ai(
     require_free: bool = False,
     force_provider: str | None = None,
 ) -> str:
-    """
-    Route to best available provider. Returns response string
-    or RATE_LIMIT_SENTINEL if all providers are exhausted.
-    """
     try:
         import litellm
         litellm.drop_params = True
@@ -257,7 +254,6 @@ def call_ai(
         logger.error("[ROUTER] No providers available.")
         return RATE_LIMIT_SENTINEL
 
-    # Highest quality first → cheapest first among equal quality
     candidates.sort(key=lambda c: (-c.quality, c.cost_per_1k))
 
     for cfg in candidates:
@@ -266,7 +262,7 @@ def call_ai(
                 logger.info(f"[ROUTER] → {cfg.provider} (attempt {attempt+1})")
                 kwargs = {}
                 if cfg.env_key:
-                    kwargs["api_key"] = os.getenv(cfg.env_key, "")
+                    kwargs["api_key"] = os.environ.get(cfg.env_key, "")
 
                 resp = litellm.completion(
                     model=cfg.model,
@@ -283,16 +279,13 @@ def call_ai(
 
             except Exception as exc:
                 logger.warning(f"[ROUTER] {cfg.provider} error: {exc}")
-
                 if _is_auth_err(exc):
                     _st(cfg.model).auth_failed = True
                     logger.error(f"[ROUTER] 🔑 Auth failed — check {cfg.env_key}")
                     break
-
                 if _is_gone_err(exc):
                     _st(cfg.model).model_gone = True
                     break
-
                 if _is_rate_err(exc):
                     if attempt == 0:
                         wait = 8 if "gemini" in cfg.model else 12
@@ -301,8 +294,6 @@ def call_ai(
                         continue
                     _mark_rate_limit(cfg.model, 60)
                     break
-
-                # Unknown error → next provider
                 break
 
     logger.error("[ROUTER] All providers exhausted.")
@@ -310,7 +301,7 @@ def call_ai(
 
 
 # ─────────────────────────────────────────────────────────────
-# BACKWARD-COMPATIBLE SHIM  (drop-in for original call_ai)
+# BACKWARD-COMPATIBLE SHIM
 # ─────────────────────────────────────────────────────────────
 def call_ai_compat(
     messages: list,
@@ -328,7 +319,8 @@ def call_ai_compat(
 def get_router_status() -> list[dict]:
     rows = []
     for cfg in ALL_MODELS:
-        has_key = bool(os.getenv(cfg.env_key)) if cfg.env_key else True
+        has_key = bool(os.environ.get(cfg.env_key, "").strip()) if cfg.env_key else True
+        is_local = "ollama" in cfg.model
         s = _st(cfg.model)
         now = time.time()
 
@@ -336,7 +328,7 @@ def get_router_status() -> list[dict]:
             status = "🔴 Auth Failed"
         elif s.model_gone:
             status = "⚫ Unavailable"
-        elif not has_key and "ollama" not in cfg.model:
+        elif not has_key and not is_local:
             status = "⚪ No Key"
         elif now < s.rate_limited_until:
             status = f"🟡 Cooldown {int(s.rate_limited_until - now)}s"
@@ -344,14 +336,14 @@ def get_router_status() -> list[dict]:
             status = "🟢 Ready"
 
         rows.append({
-            "Provider":    cfg.provider,
-            "Model":       cfg.model.split("/")[-1],
-            "Cost":        "FREE" if cfg.cost_per_1k == 0 else f"${cfg.cost_per_1k:.4f}/1k",
-            "TPM":         f"{cfg.tpm:,}",
-            "Quality":     "★" * cfg.quality + "☆" * (5 - cfg.quality),
-            "Status":      status,
-            "Calls":       s.total_calls,
-            "Tokens":      f"{s.total_tokens:,}",
+            "Provider":  cfg.provider,
+            "Model":     cfg.model.split("/")[-1],
+            "Cost":      "FREE" if cfg.cost_per_1k == 0 else f"${cfg.cost_per_1k:.4f}/1k",
+            "TPM":       f"{cfg.tpm:,}",
+            "Quality":   "★" * cfg.quality + "☆" * (5 - cfg.quality),
+            "Status":    status,
+            "Calls":     s.total_calls,
+            "Tokens":    f"{s.total_tokens:,}",
         })
     return rows
 
