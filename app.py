@@ -154,12 +154,12 @@ def build_schema_only_context(dataframes: dict) -> str:
 # Each model has its OWN token bucket on Groq (~6k-15k TPM each).
 # Falling over to the next tier gives ~33k effective TPM with no quality loss.
 #
-#  Tier │ Model                        │ TPM    │ Notes
-#  ─────┼──────────────────────────────┼────────┼──────────────────────────
-#  1    │ llama-3.3-70b-versatile      │  6,000 │ Primary — best quality
-#  2    │ llama-3.1-70b-versatile      │  6,000 │ Same quality, own bucket
-#  3    │ llama3-70b-8192              │  6,000 │ Legacy 70B, own bucket
-#  4    │ gemma2-9b-it                 │ 15,000 │ Safety net, 15k TPM
+#  Tier │ Model                             │ TPM    │ Notes
+#  ─────┼───────────────────────────────────┼────────┼──────────────────────────
+#  1    │ llama-3.3-70b-versatile           │  6,000 │ Primary — best quality
+#  2    │ deepseek-r1-distill-llama-70b     │  6,000 │ 70B distill, own bucket
+#  3    │ llama3-70b-8192                   │  6,000 │ Legacy 70B, own bucket
+#  4    │ gemma2-9b-it                      │ 15,000 │ Safety net, 15k TPM
 try:
     from groq import Groq
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -174,10 +174,10 @@ except ImportError:
 
 # Ordered fallback chain — all tiers produce high-quality ETL code
 CODE_MODEL_CHAIN = [
-    "llama-3.3-70b-versatile",   # Tier 1: best, 6k TPM
-    "llama-3.1-70b-versatile",   # Tier 2: same quality, own 6k bucket
-    "llama3-70b-8192",           # Tier 3: legacy 70B, own 6k bucket
-    "gemma2-9b-it",              # Tier 4: 15k TPM safety net
+    "llama-3.3-70b-versatile",          # Tier 1: best, 6k TPM
+    "deepseek-r1-distill-llama-70b",    # Tier 2: 70B distill, own 6k bucket
+    "llama3-70b-8192",                  # Tier 3: legacy 70B, own 6k bucket
+    "gemma2-9b-it",                     # Tier 4: 15k TPM safety net
 ]
 SUMMARY_MODEL = "llama-3.1-8b-instant"   # fast/cheap, separate quota
 JIRA_MODEL    = "llama-3.3-70b-versatile"
@@ -241,10 +241,17 @@ def call_ai(messages: list, temperature: float = 0.1, max_tokens: int = 2000,
                 st.session_state.active_model_idx = tier_idx   # remember good tier
                 return result
             except Exception as e:
-                if not _is_rate_error(e):
-                    # Real error (bad model, context issue) — fail immediately
+                err_str = str(e).lower()
+                is_decommissioned = any(x in err_str for x in
+                    ["decommissioned", "not supported", "model_decommissioned",
+                     "no longer supported", "not found", "does not exist"])
+                if not _is_rate_error(e) and not is_decommissioned:
+                    # Real execution error — fail immediately
                     st.error(f"AI error on {use_model}: {e}")
                     st.stop()
+                if is_decommissioned:
+                    # Skip this tier silently, try next
+                    break
                 if attempt == 0:
                     # First rate-limit on this tier: wait 12s, retry once
                     st.toast(f"⏱️ Tier {tier_idx+1} rate-limited — retrying in 12s…", icon="⏳")
@@ -878,10 +885,10 @@ with tab1:
 
     with st.expander("🤖 AI Model Status — Multi-Model Waterfall", expanded=False):
         tier_rows = [
-            {"Tier": "1 ⭐ Primary",   "Model": "llama-3.3-70b-versatile", "TPM": "6,000",  "Quality": "★★★★★"},
-            {"Tier": "2 Fallback",     "Model": "llama-3.1-70b-versatile", "TPM": "6,000",  "Quality": "★★★★★"},
-            {"Tier": "3 Fallback",     "Model": "llama3-70b-8192",          "TPM": "6,000",  "Quality": "★★★★☆"},
-            {"Tier": "4 Safety Net",   "Model": "gemma2-9b-it",             "TPM": "15,000", "Quality": "★★★★☆"},
+            {"Tier": "1 ⭐ Primary",  "Model": "llama-3.3-70b-versatile",       "TPM": "6,000",  "Quality": "★★★★★"},
+            {"Tier": "2 Fallback",    "Model": "deepseek-r1-distill-llama-70b", "TPM": "6,000",  "Quality": "★★★★★"},
+            {"Tier": "3 Fallback",    "Model": "llama3-70b-8192",               "TPM": "6,000",  "Quality": "★★★★☆"},
+            {"Tier": "4 Safety Net",  "Model": "gemma2-9b-it",                  "TPM": "15,000", "Quality": "★★★★☆"},
         ]
         active = st.session_state.get("active_model_idx", 0)
         for i, row in enumerate(tier_rows):
