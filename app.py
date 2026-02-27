@@ -473,8 +473,7 @@ Return ONLY a JSON array of strings: ["Step one", "Step two"]. No markdown, no o
 
 def render_decrypt_download_panel(
     masked_result_df: pd.DataFrame,
-    original_dataframes: dict,
-    ai_code: str,
+    original_df: pd.DataFrame,
     file_names: list,
     all_masked_cols: list
 ):
@@ -543,36 +542,31 @@ def render_decrypt_download_panel(
         if decrypt_ack:
             audit_log("DECRYPT_EXPORT_ACKNOWLEDGED", SESSION_ID,
                       f"User acknowledged PII export. Files={file_names}", "HIGH")
-            with st.spinner("🔓 Re-running transformation on original data..."):
-                try:
-                    original_result_df = safe_exec_multi(original_dataframes, ai_code)
-                    orig_csv = original_result_df.to_csv(index=False).encode("utf-8")
-                    st.download_button(
-                        label="🔓 Download DECRYPTED CSV (Original Data)",
-                        data=orig_csv,
-                        file_name="output_ORIGINAL_DATA_SENSITIVE.csv",
-                        mime="text/csv",
-                        key="dl_original_csv"
-                    )
-                    orig_xlsx = BytesIO()
-                    with pd.ExcelWriter(orig_xlsx, engine="xlsxwriter") as writer:
-                        original_result_df.to_excel(writer, sheet_name="Original_Data", index=False)
-                        pd.DataFrame([
-                            {"Check": "Export Type", "Result": "DECRYPTED — CONTAINS REAL PII"},
-                            {"Check": "Authorised By", "Result": "User Acknowledged"},
-                            {"Check": "Session", "Result": SESSION_ID},
-                            {"Check": "Timestamp", "Result": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-                        ]).to_excel(writer, sheet_name="Access_Log", index=False)
-                    st.download_button(
-                        label="🔓 Download DECRYPTED Excel (Original Data)",
-                        data=orig_xlsx.getvalue(),
-                        file_name="output_ORIGINAL_DATA_SENSITIVE.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="dl_original_xlsx"
-                    )
-                    st.warning("⚠️ This file contains real PII. Handle according to your data classification policy.")
-                except Exception as exc:
-                    st.error(f"Could not re-run on original data: {exc}")
+            orig_csv = original_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="🔓 Download DECRYPTED CSV (Original Data)",
+                data=orig_csv,
+                file_name="output_ORIGINAL_DATA_SENSITIVE.csv",
+                mime="text/csv",
+                key="dl_original_csv"
+            )
+            orig_xlsx = BytesIO()
+            with pd.ExcelWriter(orig_xlsx, engine="xlsxwriter") as writer:
+                original_df.to_excel(writer, sheet_name="Original_Data", index=False)
+                pd.DataFrame([
+                    {"Check": "Export Type", "Result": "DECRYPTED — CONTAINS REAL PII"},
+                    {"Check": "Authorised By", "Result": "User Acknowledged"},
+                    {"Check": "Session", "Result": SESSION_ID},
+                    {"Check": "Timestamp", "Result": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+                ]).to_excel(writer, sheet_name="Access_Log", index=False)
+            st.download_button(
+                label="🔓 Download DECRYPTED Excel (Original Data)",
+                data=orig_xlsx.getvalue(),
+                file_name="output_ORIGINAL_DATA_SENSITIVE.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_original_xlsx"
+            )
+            st.warning("⚠️ This file contains real PII. Handle according to your data classification policy.")
         else:
             st.info("Check the acknowledgement box above to unlock decrypted export.")
 
@@ -860,14 +854,18 @@ with tab1:
         primary_alias = "df" if len(uploaded_files) == 1 else "df1"
         original_rows = dataframes_masked[primary_alias].shape[0]
 
+        # ✅ PRIVACY MODEL: Schema (masked) → AI for code generation
+        #                   Original data → exec() for actual processing
+        # This ensures: joins work on real keys, names/values are correct,
+        # aggregations are accurate, while AI never sees real data values.
         system_prompt = build_system_prompt_secure(dataframes_masked)
-        audit_log("AI_QUERY", SESSION_ID, f"Files={file_names}, masked_cols={all_masked_cols}", "LOW")
+        audit_log("AI_QUERY_SCHEMA_ONLY", SESSION_ID, f"Files={file_names}, masked_cols={all_masked_cols}", "LOW")
 
         st.markdown('<div class="section-title">⚡ Execution Flow</div>', unsafe_allow_html=True)
         gde_slot = st.empty()
-        gde_slot.markdown(make_gde_html(dataframes_masked, file_names, "", None, "reading", masked_cols=all_masked_cols), unsafe_allow_html=True)
+        gde_slot.markdown(make_gde_html(dataframes_original, file_names, "", None, "reading", masked_cols=all_masked_cols), unsafe_allow_html=True)
         time.sleep(0.4)
-        gde_slot.markdown(make_gde_html(dataframes_masked, file_names, "", None, "transforming", masked_cols=all_masked_cols), unsafe_allow_html=True)
+        gde_slot.markdown(make_gde_html(dataframes_original, file_names, "", None, "transforming", masked_cols=all_masked_cols), unsafe_allow_html=True)
 
         MAX_ATTEMPTS = 3
         ai_code = ""
@@ -885,7 +883,10 @@ with tab1:
                     conversation.append({"role": "user", "content": f"Attempt {attempt-1} raised:\n{last_error}\nFix it. Store result in 'result'. No markdown fences."})
                 ai_code = call_ai(conversation, temperature=0.05)
                 try:
-                    transformed_df = safe_exec_multi(dataframes_masked, ai_code)
+                    # ✅ KEY FIX: execute AI code on ORIGINAL unmasked dataframes
+                    # AI only saw schema — code references column names not values
+                    # Running on original data ensures correct joins, names, and values
+                    transformed_df = safe_exec_multi(dataframes_original, ai_code)
                     last_error = None
                     break
                 except Exception as exc:
@@ -893,14 +894,21 @@ with tab1:
                     if attempt == MAX_ATTEMPTS:
                         st.error(f"ETL failed after {MAX_ATTEMPTS} attempts:\n\n{exc}")
                         st.code(extract_code(ai_code), language="python")
-                        transformed_df = list(dataframes_masked.values())[0].copy()
+                        transformed_df = list(dataframes_original.values())[0].copy()
 
-        gde_slot.markdown(make_gde_html(dataframes_masked, file_names, extract_code(ai_code), transformed_df, "done", masked_cols=all_masked_cols), unsafe_allow_html=True)
+        gde_slot.markdown(make_gde_html(dataframes_original, file_names, extract_code(ai_code), transformed_df, "done", masked_cols=all_masked_cols), unsafe_allow_html=True)
         audit_log("ETL_COMPLETE", SESSION_ID, f"Rows: {original_rows}→{len(transformed_df)}, Status={'OK' if last_error is None else 'FAILED'}", "LOW")
 
         # Store for decrypt panel
+        # masked_df = result with PII columns re-masked for safe display/download
+        # original_df = raw result (already computed above from original data)
+        masked_result_df = transformed_df.copy()
+        for col in transformed_df.columns:
+            masked_result_df[col] = mask_sensitive_column(transformed_df[col], col)
+
         st.session_state.last_etl_result = {
-            "masked_df": transformed_df,
+            "masked_df": masked_result_df,        # for safe download
+            "original_df": transformed_df,        # for decrypt download (no re-run needed)
             "original_dataframes": dataframes_original,
             "ai_code": ai_code,
             "file_names": file_names,
@@ -925,13 +933,13 @@ with tab1:
         with st.expander("🔍 View generated Python code", expanded=False):
             st.code(extract_code(ai_code), language="python")
 
-        st.markdown('<div class="section-title">Transformed Output (Preview)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Transformed Output (Preview — PII Masked)</div>', unsafe_allow_html=True)
         total_rows = len(transformed_df)
         col_info, col_select = st.columns([3, 1])
-        col_info.markdown(f"<span style='font-size:13px;color:#666;'>Total records: <b>{total_rows:,}</b> &nbsp;·&nbsp; <span style='color:#2E7D32;'>🔒 PII-protected preview</span></span>", unsafe_allow_html=True)
+        col_info.markdown(f"<span style='font-size:13px;color:#666;'>Total records: <b>{total_rows:,}</b> &nbsp;·&nbsp; <span style='color:#E65100;'>⚠️ Preview shows masked PII — use Decrypt Export for original values</span></span>", unsafe_allow_html=True)
         display_options = sorted(set(n for n in [20, 50, 100, 500, 1000, total_rows] if n <= total_rows)) or [total_rows]
         display_n = col_select.selectbox("Show rows", options=display_options, index=0, key="display_rows")
-        st.dataframe(transformed_df.head(display_n), use_container_width=True)
+        st.dataframe(masked_result_df.head(display_n), use_container_width=True)
 
         st.session_state.history.append({
             "Time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -951,8 +959,7 @@ with tab1:
         st.markdown("---")
         render_decrypt_download_panel(
             masked_result_df=r["masked_df"],
-            original_dataframes=r["original_dataframes"],
-            ai_code=r["ai_code"],
+            original_df=r["original_df"],
             file_names=r["file_names"],
             all_masked_cols=r["all_masked_cols"],
         )
