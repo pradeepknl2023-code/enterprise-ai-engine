@@ -149,8 +149,17 @@ def build_schema_only_context(dataframes: dict) -> str:
     return schema_lines
 
 # -----------------------------------
-# GROQ / AI SETUP  ← swap for any LLM
+# GROQ / AI SETUP  — Multi-Model Waterfall
 # -----------------------------------
+# Each model has its OWN token bucket on Groq (~6k-15k TPM each).
+# Falling over to the next tier gives ~33k effective TPM with no quality loss.
+#
+#  Tier │ Model                        │ TPM    │ Notes
+#  ─────┼──────────────────────────────┼────────┼──────────────────────────
+#  1    │ llama-3.3-70b-versatile      │  6,000 │ Primary — best quality
+#  2    │ llama-3.1-70b-versatile      │  6,000 │ Same quality, own bucket
+#  3    │ llama3-70b-8192              │  6,000 │ Legacy 70B, own bucket
+#  4    │ gemma2-9b-it                 │ 15,000 │ Safety net, 15k TPM
 try:
     from groq import Groq
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -158,61 +167,93 @@ try:
         st.error("⚠️ Set GROQ_API_KEY in Streamlit Secrets or environment variables.")
         st.stop()
     ai_client = Groq(api_key=GROQ_API_KEY)
-    AI_MODEL = "llama-3.3-70b-versatile"
-    AI_PROVIDER = "Groq / LLaMA 3.3 70B"
+    AI_PROVIDER = "Groq / Multi-Model Waterfall"
 except ImportError:
     st.error("groq package not installed. Run: pip install groq")
     st.stop()
 
+# Ordered fallback chain — all tiers produce high-quality ETL code
+CODE_MODEL_CHAIN = [
+    "llama-3.3-70b-versatile",   # Tier 1: best, 6k TPM
+    "llama-3.1-70b-versatile",   # Tier 2: same quality, own 6k bucket
+    "llama3-70b-8192",           # Tier 3: legacy 70B, own 6k bucket
+    "gemma2-9b-it",              # Tier 4: 15k TPM safety net
+]
+SUMMARY_MODEL = "llama-3.1-8b-instant"   # fast/cheap, separate quota
+JIRA_MODEL    = "llama-3.3-70b-versatile"
+
+# Per-session tier tracking (resets each page load)
+if "active_model_idx" not in st.session_state:
+    st.session_state.active_model_idx = 0
+
 RATE_LIMIT_SENTINEL = "__RATE_LIMIT__"
+
+def _single_call(model: str, messages: list, temperature: float, max_tokens: int) -> str:
+    """One raw API call. Raises on any error."""
+    resp = ai_client.chat.completions.create(
+        model=model, messages=messages,
+        temperature=temperature, max_tokens=max_tokens,
+    )
+    return resp.choices[0].message.content
+
+def _is_rate_error(exc: Exception) -> bool:
+    s = (str(type(exc).__name__) + str(exc)).lower()
+    return any(x in s for x in ["rate", "429", "ratelimit", "quota",
+                                  "tokens per", "requests per", "request rate"])
 
 def call_ai(messages: list, temperature: float = 0.1, max_tokens: int = 2000,
             model: str = None, task: str = "code") -> str:
     """
-    Call AI with automatic exponential backoff on rate limits.
-    task=code    -> main model, 1600 tokens (ETL code generation)
-    task=summary -> fast 8b model, 400 tokens  (pipeline narration)
-    task=jira    -> main model, 3000 tokens (structured JSON output)
+    Multi-model waterfall call. Returns RATE_LIMIT_SENTINEL only when
+    ALL tiers are exhausted. Caller must check for this value.
 
-    Returns RATE_LIMIT_SENTINEL string on rate limit (caller must check).
-    Uses st.error + st.stop() for other fatal errors so Streamlit shows them clearly.
+    task=code    → waterfall through CODE_MODEL_CHAIN (1,600 tokens)
+    task=summary → llama-3.1-8b-instant (400 tokens, separate quota)
+    task=jira    → llama-3.3-70b-versatile (3,000 tokens)
     """
-    use_model = model or ("llama-3.1-8b-instant" if task == "summary" else AI_MODEL)
     token_limit = {"code": 1600, "summary": 400, "jira": 3000}.get(task, max_tokens)
 
-    MAX_RETRIES = 3
-    WAIT_SECS   = [20, 45]   # wait between retries (only 2 waits for 3 attempts)
-
-    last_err_str = ""
-    for attempt in range(MAX_RETRIES):
-        try:
-            resp = ai_client.chat.completions.create(
-                model=use_model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=token_limit,
-            )
-            return resp.choices[0].message.content
-
-        except Exception as e:
-            last_err_str = str(type(e).__name__) + ": " + str(e)
-            is_rate = any(x in last_err_str.lower() for x in
-                          ["rate", "429", "ratelimit", "quota", "tokens per",
-                           "requests per", "request rate"])
-            is_last = (attempt == MAX_RETRIES - 1)
-
-            if is_rate:
-                if is_last:
-                    return RATE_LIMIT_SENTINEL   # caller handles display
-                wait = WAIT_SECS[attempt]
-                st.warning(f"⏱️ Groq rate limit — waiting {wait}s then retrying "
-                           f"(attempt {attempt+1}/{MAX_RETRIES})...")
-                time.sleep(wait)
-            else:
-                # Non-rate-limit error: show clearly and stop
-                st.error(f"AI API error ({task}): {last_err_str}")
+    # ── summary / jira: single model, one retry ──────────────────────────
+    if task in ("summary", "jira"):
+        use_model = model or (SUMMARY_MODEL if task == "summary" else JIRA_MODEL)
+        for attempt in range(2):
+            try:
+                return _single_call(use_model, messages, temperature, token_limit)
+            except Exception as e:
+                if _is_rate_error(e) and attempt == 0:
+                    time.sleep(15)
+                    continue
+                if _is_rate_error(e):
+                    return RATE_LIMIT_SENTINEL
+                st.error(f"AI error ({task}): {e}")
                 st.stop()
+        return RATE_LIMIT_SENTINEL
 
+    # ── code: waterfall Tier 1 → 4 ───────────────────────────────────────
+    start = st.session_state.get("active_model_idx", 0)
+    tier_order = list(range(start, len(CODE_MODEL_CHAIN))) + list(range(0, start))
+
+    for tier_idx in tier_order:
+        use_model = CODE_MODEL_CHAIN[tier_idx]
+        for attempt in range(2):          # 2 attempts per tier
+            try:
+                result = _single_call(use_model, messages, temperature, token_limit)
+                st.session_state.active_model_idx = tier_idx   # remember good tier
+                return result
+            except Exception as e:
+                if not _is_rate_error(e):
+                    # Real error (bad model, context issue) — fail immediately
+                    st.error(f"AI error on {use_model}: {e}")
+                    st.stop()
+                if attempt == 0:
+                    # First rate-limit on this tier: wait 12s, retry once
+                    st.toast(f"⏱️ Tier {tier_idx+1} rate-limited — retrying in 12s…", icon="⏳")
+                    time.sleep(12)
+                    continue
+                # Second rate-limit: move to next tier immediately (no wait)
+                break
+
+    # All 4 tiers exhausted
     return RATE_LIMIT_SENTINEL
 
 # -----------------------------------
@@ -703,12 +744,12 @@ st.markdown("""
 st.markdown(f"""
 <div class="main-header">
     <div>
-        <div class="header-sub">AI POWERED &nbsp;·&nbsp; {AI_PROVIDER} &nbsp;·&nbsp; PANDAS &nbsp;·&nbsp; 🔒 BANK-GRADE PRIVACY</div>
+        <div class="header-sub">AI POWERED &nbsp;·&nbsp; LLAMA 3.3 · MULTI-MODEL &nbsp;·&nbsp; PANDAS &nbsp;·&nbsp; 🔒 BANK-GRADE PRIVACY</div>
         <h1>⚡ Enterprise AI Transformation &amp; Delivery Platform</h1>
         <div class="secure-badge">🛡️ PII PROTECTED · SCHEMA-ONLY AI · DECRYPT ON DEMAND · AUDIT LOGGED</div>
     </div>
     <div style="text-align:right;">
-        <div class="version-badge">v5.0 SECURE</div>
+        <div class="version-badge">v5.1 SECURE</div>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -835,18 +876,21 @@ with tab1:
             aliases_list = [f"df{i+1}" for i in range(len(uploaded_files))]
             st.info(f"**{len(uploaded_files)} files loaded.** Reference as: {', '.join(f'`{a}`' for a in aliases_list)}")
 
-    with st.expander("ℹ️ Groq Rate Limits & Tips", expanded=False):
+    with st.expander("🤖 AI Model Status — Multi-Model Waterfall", expanded=False):
+        tier_rows = [
+            {"Tier": "1 ⭐ Primary",   "Model": "llama-3.3-70b-versatile", "TPM": "6,000",  "Quality": "★★★★★"},
+            {"Tier": "2 Fallback",     "Model": "llama-3.1-70b-versatile", "TPM": "6,000",  "Quality": "★★★★★"},
+            {"Tier": "3 Fallback",     "Model": "llama3-70b-8192",          "TPM": "6,000",  "Quality": "★★★★☆"},
+            {"Tier": "4 Safety Net",   "Model": "gemma2-9b-it",             "TPM": "15,000", "Quality": "★★★★☆"},
+        ]
+        active = st.session_state.get("active_model_idx", 0)
+        for i, row in enumerate(tier_rows):
+            row["Status"] = "🟢 Active" if i == active else "⚪ Ready"
+        st.dataframe(pd.DataFrame(tier_rows), use_container_width=True, hide_index=True)
         st.markdown("""
-<div style="font-size:12px;color:#333;line-height:1.8;">
-<b>Why might I see a rate limit error?</b><br>
-Groq's free tier allows ~6,000 output tokens/minute. A complex 3-file ETL prompt generates ~800–1,500 tokens of Python code.
-Multiple rapid attempts can exceed this limit.<br><br>
-<b>✅ Tips to avoid rate limits:</b><br>
-• Wait 60 seconds between runs if you hit a limit (auto-retry is built in)<br>
-• The app auto-retries up to 4 times with exponential backoff (15s → 30s → 60s)<br>
-• Pipeline summary uses a faster model (llama-3.1-8b) to save quota<br>
-• Use <b>Groq paid tier</b> for higher limits in production<br><br>
-<b>Current models used:</b> ETL code → <code>llama-3.3-70b-versatile</code> &nbsp;|&nbsp; Summary → <code>llama-3.1-8b-instant</code>
+<div style="font-size:11px;color:#555;line-height:1.8;margin-top:6px;">
+<b>How it works:</b> App tries Tier 1 first. On rate-limit: retries once (12s), then falls to Tier 2 instantly — a completely separate token bucket. Tiers 1–3 are all 70B-class models (same output quality).<br>
+<b>Total effective capacity ≈ 33,000 tokens/min</b> vs 6,000 with a single model.
 </div>
 """, unsafe_allow_html=True)
 
