@@ -164,20 +164,26 @@ except ImportError:
     st.error("groq package not installed. Run: pip install groq")
     st.stop()
 
+RATE_LIMIT_SENTINEL = "__RATE_LIMIT__"
+
 def call_ai(messages: list, temperature: float = 0.1, max_tokens: int = 2000,
             model: str = None, task: str = "code") -> str:
     """
     Call AI with automatic exponential backoff on rate limits.
-    task=code    -> main model, 2000 tokens (ETL code generation)
-    task=summary -> fast 8b model, 500 tokens (pipeline narration)
-    task=jira    -> main model, 3500 tokens (structured JSON output)
+    task=code    -> main model, 1600 tokens (ETL code generation)
+    task=summary -> fast 8b model, 400 tokens  (pipeline narration)
+    task=jira    -> main model, 3000 tokens (structured JSON output)
+
+    Returns RATE_LIMIT_SENTINEL string on rate limit (caller must check).
+    Uses st.error + st.stop() for other fatal errors so Streamlit shows them clearly.
     """
     use_model = model or ("llama-3.1-8b-instant" if task == "summary" else AI_MODEL)
     token_limit = {"code": 1600, "summary": 400, "jira": 3000}.get(task, max_tokens)
 
-    MAX_RETRIES = 4
-    base_wait = 15
+    MAX_RETRIES = 3
+    WAIT_SECS   = [20, 45]   # wait between retries (only 2 waits for 3 attempts)
 
+    last_err_str = ""
     for attempt in range(MAX_RETRIES):
         try:
             resp = ai_client.chat.completions.create(
@@ -187,25 +193,27 @@ def call_ai(messages: list, temperature: float = 0.1, max_tokens: int = 2000,
                 max_tokens=token_limit,
             )
             return resp.choices[0].message.content
-        except Exception as e:
-            err_str = str(type(e).__name__).lower() + str(e).lower()
-            is_rate_limit = any(x in err_str for x in ["rate", "429", "ratelimit", "quota", "tokens per"])
-            is_last = attempt == MAX_RETRIES - 1
 
-            if is_last:
-                if is_rate_limit:
-                    raise RuntimeError(
-                        f"Rate limit reached after {MAX_RETRIES} retries. "
-                        f"Please wait 60 seconds and try again. "
-                        f"(Groq free tier: ~6,000 output tokens/min for {use_model})"
-                    )
-                raise
-            if is_rate_limit:
-                wait = base_wait * (2 ** attempt)
-                st.warning(f"Rate limit — auto-retrying in {wait}s (attempt {attempt+1}/{MAX_RETRIES-1})...")
+        except Exception as e:
+            last_err_str = str(type(e).__name__) + ": " + str(e)
+            is_rate = any(x in last_err_str.lower() for x in
+                          ["rate", "429", "ratelimit", "quota", "tokens per",
+                           "requests per", "request rate"])
+            is_last = (attempt == MAX_RETRIES - 1)
+
+            if is_rate:
+                if is_last:
+                    return RATE_LIMIT_SENTINEL   # caller handles display
+                wait = WAIT_SECS[attempt]
+                st.warning(f"⏱️ Groq rate limit — waiting {wait}s then retrying "
+                           f"(attempt {attempt+1}/{MAX_RETRIES})...")
                 time.sleep(wait)
             else:
-                raise
+                # Non-rate-limit error: show clearly and stop
+                st.error(f"AI API error ({task}): {last_err_str}")
+                st.stop()
+
+    return RATE_LIMIT_SENTINEL
 
 # -----------------------------------
 # FULL CSS
@@ -442,6 +450,8 @@ Each step starts with: Loaded, Joined, Filtered, Cleaned, Computed, Aggregated, 
 Return ONLY a JSON array of strings: ["Step one", "Step two"]. No markdown, no other text."""
     try:
         raw = call_ai([{"role": "user", "content": summary_prompt}], temperature=0.2, task="summary")
+        if raw == RATE_LIMIT_SENTINEL:
+            raise ValueError("rate_limit")
         arr_match = re.search(r"\[.*\]", raw, re.DOTALL)
         steps = json.loads(arr_match.group()) if arr_match else [raw]
     except Exception:
@@ -646,28 +656,34 @@ def render_jira_cards(data):
 # ============================================================
 EXAMPLE_PROMPTS = [
     {
-        "tag": "🏦 Risk Profiling",
-        "text": "Join customers with accounts on CUSTOMER_ID. Join accounts with transactions on ACCOUNT_ID. Filter only ACTIVE accounts. For each CUSTOMER_ID calculate: total number of transactions (last 90 days), total debit amount (last 90 days), total credit amount (last 90 days), average transaction amount. Create RISK_LEVEL: HIGH if total debit > 500000 OR more than 3 high-value transactions (>100000), MEDIUM if total debit between 200000 and 500000, LOW otherwise. Exclude customers with KYC_STATUS = REJECTED. Output: CUSTOMER_ID, FULL_NAME (FIRST_NAME + LAST_NAME), ACCOUNT_COUNT, TOTAL_TRANSACTIONS, TOTAL_DEBIT, TOTAL_CREDIT, AVG_TRANSACTION_AMOUNT, RISK_LEVEL. Sort by TOTAL_DEBIT descending."
+        "tag": "✅ Customer Transaction Summary",
+        "complexity": "Medium",
+        "text": "Join customers with accounts on CUSTOMER_ID, then join with transactions on ACCOUNT_ID. Keep only ACTIVE accounts and VERIFIED customers. For each customer compute: FULL_NAME (FIRST_NAME + LAST_NAME), ACCOUNT_COUNT, TOTAL_TRANSACTIONS, TOTAL_AMOUNT (all transactions), AVG_AMOUNT, sorted by TOTAL_AMOUNT descending."
     },
     {
-        "tag": "📊 Monthly Aggregation",
-        "text": "Join customers with accounts on CUSTOMER_ID. Join accounts with transactions on ACCOUNT_ID. For each customer compute monthly transaction summary for the last 6 months: month, total_credit, total_debit, net_flow (credit - debit), transaction_count. Only include ACTIVE accounts and VERIFIED customers. Sort by customer and month."
+        "tag": "✅ Channel Spend Analysis",
+        "complexity": "Simple",
+        "text": "Using the transactions file, filter only DEBIT transactions. Group by CHANNEL and compute: TOTAL_TRANSACTIONS, TOTAL_AMOUNT, AVG_AMOUNT, MAX_AMOUNT. Sort by TOTAL_AMOUNT descending."
     },
     {
-        "tag": "🔍 Dormant Account Detection",
-        "text": "Join accounts with transactions on ACCOUNT_ID. Find all ACTIVE accounts that have had zero transactions in the last 180 days (i.e. dormant). Join with customers on CUSTOMER_ID. Output: CUSTOMER_ID, FIRST_NAME, LAST_NAME, ACCOUNT_ID, ACCOUNT_TYPE, BALANCE, OPEN_DATE, DAYS_SINCE_LAST_TRANSACTION. Sort by DAYS_SINCE_LAST_TRANSACTION descending."
+        "tag": "✅ Dormant Account Report",
+        "complexity": "Medium",
+        "text": "Join accounts with transactions on ACCOUNT_ID. For each DORMANT account, find the last transaction date (LAST_TXN_DATE) and calculate DAYS_INACTIVE as days since last transaction. Join with customers to get FIRST_NAME, LAST_NAME. Output: CUSTOMER_ID, FIRST_NAME, LAST_NAME, ACCOUNT_ID, ACCOUNT_TYPE, BALANCE, LAST_TXN_DATE, DAYS_INACTIVE. Sort by DAYS_INACTIVE descending."
     },
     {
-        "tag": "💰 High Value Customer Segmentation",
-        "text": "Join all three files. For ACTIVE accounts only, calculate per customer: total balance across all accounts, total credit in last 30 days, total debit in last 30 days. Segment customers into PLATINUM (total balance > 1000000), GOLD (500000-1000000), SILVER (100000-500000), BRONZE (below 100000). Exclude REJECTED KYC. Output customer details with SEGMENT and total metrics. Sort by total balance descending."
+        "tag": "✅ Monthly Credit vs Debit",
+        "complexity": "Medium",
+        "text": "Using the transactions file, extract MONTH from TRANSACTION_DATE (format YYYY-MM). Pivot to get CREDIT total and DEBIT total per month. Add a NET_FLOW column (CREDIT minus DEBIT). Sort by MONTH ascending."
     },
     {
-        "tag": "📈 Transaction Channel Analysis",
-        "text": "Join transactions with accounts on ACCOUNT_ID, then with customers on CUSTOMER_ID. For ACTIVE accounts with VERIFIED KYC only, compute per customer per channel (UPI/NEFT/IMPS etc): transaction_count, total_amount, avg_amount. Pivot channels as columns. Add a PREFERRED_CHANNEL column showing the channel with highest transaction count."
+        "tag": "✅ Top 20 Customers by Balance",
+        "complexity": "Simple",
+        "text": "Join customers with accounts on CUSTOMER_ID. Keep only ACTIVE accounts and exclude REJECTED KYC customers. Per customer calculate FULL_NAME (FIRST_NAME + LAST_NAME), TOTAL_BALANCE (sum of BALANCE across all active accounts), ACCOUNT_COUNT. Return top 20 by TOTAL_BALANCE descending."
     },
     {
-        "tag": "⚠️ Fraud Velocity Check",
-        "text": "Join transactions with accounts on ACCOUNT_ID. For the last 7 days only, flag accounts where: more than 5 DEBIT transactions in a single day (velocity flag), OR any single transaction > 200000 (large transaction flag), OR more than 3 transactions from the same channel in 24 hours (channel concentration). Join with customers. Output flagged records with flag type, transaction details, customer name. Sort by transaction date descending."
+        "tag": "⚡ Risk Profile (Complex)",
+        "complexity": "High",
+        "text": "Join customers with accounts on CUSTOMER_ID. Join accounts with transactions on ACCOUNT_ID. Filter only ACTIVE accounts. Exclude KYC_STATUS = REJECTED. For each CUSTOMER_ID using last 90 days transactions compute: TOTAL_TRANSACTIONS, TOTAL_DEBIT (sum of DEBIT amounts), TOTAL_CREDIT (sum of CREDIT amounts), AVG_TRANSACTION_AMOUNT. RISK_LEVEL: HIGH if TOTAL_DEBIT > 500000 or more than 3 transactions above 100000, MEDIUM if TOTAL_DEBIT between 200000 and 500000, LOW otherwise. Output: CUSTOMER_ID, FULL_NAME, ACCOUNT_COUNT, TOTAL_TRANSACTIONS, TOTAL_DEBIT, TOTAL_CREDIT, AVG_TRANSACTION_AMOUNT, RISK_LEVEL. Sort by TOTAL_DEBIT descending."
     },
 ]
 
@@ -752,10 +768,14 @@ with tab1:
     st.markdown('<div class="section-title">💡 Example Complex Prompts</div>', unsafe_allow_html=True)
     st.markdown("<div style='font-size:12px;color:#666;margin-bottom:8px;'>Click any example to load it into the prompt box:</div>", unsafe_allow_html=True)
 
+    complexity_color = {"Simple": "#2E7D32", "Medium": "#E65100", "High": "#B31B1B"}
     cols_ex = st.columns(3)
     for i, ex in enumerate(EXAMPLE_PROMPTS):
         with cols_ex[i % 3]:
-            if st.button(f"{ex['tag']}", key=f"ex_{i}", use_container_width=True):
+            c = ex.get("complexity", "Medium")
+            color = complexity_color.get(c, "#666")
+            label = f"{ex['tag']}  [{c}]"
+            if st.button(label, key=f"ex_{i}", use_container_width=True):
                 st.session_state["etl_prompt_value"] = ex["text"]
 
     # Prompt input
@@ -905,31 +925,35 @@ Multiple rapid attempts can exceed this limit.<br><br>
             for attempt in range(1, MAX_ATTEMPTS + 1):
                 if last_error and attempt > 1:
                     conversation.append({"role": "assistant", "content": ai_code})
-                    conversation.append({"role": "user", "content": f"Attempt {attempt-1} raised:\n{last_error}\nFix it. Store result in 'result'. No markdown fences."})
+                    conversation.append({"role": "user", "content": f"Attempt {attempt-1} raised:\n{last_error}\nFix it. Store result in \'result\'. No markdown fences."})
+
                 ai_code = call_ai(conversation, temperature=0.05, task="code")
+
+                # Check for rate limit sentinel BEFORE trying to execute
+                if ai_code == RATE_LIMIT_SENTINEL:
+                    st.error("""
+### ⏱️ Groq Rate Limit Reached
+
+The AI API quota was exhausted after automatic retries.
+
+**To fix this:**
+- ⏳ Wait **60 seconds**, then click **▶ Execute ETL** again
+- 💡 Try a **simpler prompt** (see examples above) — they use fewer tokens
+- 🔑 Use a **Groq paid tier** key for higher limits in production
+
+*The app automatically retried with backoff — this means the limit was sustained.*
+""")
+                    st.stop()
+
                 try:
-                    # ✅ KEY FIX: execute AI code on ORIGINAL unmasked dataframes
-                    # AI only saw schema — code references column names not values
-                    # Running on original data ensures correct joins, names, and values
                     transformed_df = safe_exec_multi(dataframes_original, ai_code)
                     last_error = None
                     break
                 except Exception as exc:
                     last_error = str(exc)
                     if attempt == MAX_ATTEMPTS:
-                        err_msg = str(exc)
-                        is_rate = any(x in err_msg.lower() for x in ["rate limit", "rate_limit", "429", "quota", "tokens per"])
-                        if is_rate:
-                            st.error("""
-⏱️ **Groq Rate Limit Reached**
-
-The AI API is temporarily rate-limited. **Wait 60 seconds** then try again.
-The app will auto-retry up to 4x with backoff on the next run.
-
-*Tip: Reduce prompt complexity or upgrade to Groq paid tier for production.*
-""")
-                        else:
-                            st.error(f"ETL failed after {MAX_ATTEMPTS} attempts:\n\n{exc}")
+                        st.error(f"⚠️ ETL code execution failed after {MAX_ATTEMPTS} attempts. Last error: {exc}")
+                        with st.expander("🔍 View generated code for debugging"):
                             st.code(extract_code(ai_code), language="python")
                         transformed_df = list(dataframes_original.values())[0].copy()
 
@@ -963,7 +987,18 @@ The app will auto-retry up to 4x with backoff on the next run.
             """, unsafe_allow_html=True)
 
         with st.spinner("Generating pipeline summary..."):
-            metrics_html, steps_html = build_pipeline_log(extract_code(ai_code), dataframes_masked, transformed_df, file_names, original_rows)
+            try:
+                metrics_html, steps_html = build_pipeline_log(extract_code(ai_code), dataframes_masked, transformed_df, file_names, original_rows)
+            except Exception:
+                # Summary generation is non-critical — show metrics only
+                new_cols = [c for c in transformed_df.columns if c not in list(dataframes_masked.values())[0].columns]
+                metrics_html = f'''<div class="metric-row">
+                <div class="metric-box"><div class="metric-value">{len(file_names)}</div><div class="metric-label">Files</div></div>
+                <div class="metric-box"><div class="metric-value">{original_rows:,}</div><div class="metric-label">Rows In</div></div>
+                <div class="metric-box"><div class="metric-value">{len(transformed_df):,}</div><div class="metric-label">Rows Out</div></div>
+                <div class="metric-box"><div class="metric-value">{len(transformed_df.columns)}</div><div class="metric-label">Columns</div></div>
+                </div>'''
+                steps_html = '<div class="pipeline-steps"><div class="pipeline-step"><span class="step-icon">✅</span><span class="step-text">Transformation complete. Summary unavailable (API quota).</span></div></div>'
         st.markdown(metrics_html, unsafe_allow_html=True)
         with st.expander("📋 View detailed pipeline steps", expanded=False):
             st.markdown(steps_html, unsafe_allow_html=True)
@@ -1053,6 +1088,14 @@ with tab2:
                 [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_prompt}],
                 temperature=0.3, task="jira"
             )
+
+        if raw_output == RATE_LIMIT_SENTINEL:
+            st.error("""
+### ⏱️ Groq Rate Limit Reached
+Wait **60 seconds** then click **Generate Jira Breakdown** again.
+The Jira prompt is token-heavy — the app retried automatically before showing this.
+""")
+            st.stop()
 
         try:
             json_match = re.search(r"\{.*\}", raw_output, re.DOTALL)
