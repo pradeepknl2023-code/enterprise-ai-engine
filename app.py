@@ -1,10 +1,5 @@
-from litellm import completion
+import os
 import streamlit as st
 
-response = completion(
-    model="google/gemini-1.5-flash",
-    messages=[{"role": "user", "content": "Hello"}],
-    api_key=st.secrets["GEMINI_API_KEY"]
-)
-
-st.write(response.choices[0].message.content)
+os.environ["GEMINI_API_KEY"] = st.secrets.get("GEMINI_API_KEY", "")
+os.environ["GROQ_API_KEY"] = st.secrets.get("GROQ_API_KEY", "")
