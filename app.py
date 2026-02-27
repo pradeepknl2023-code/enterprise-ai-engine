@@ -140,15 +140,12 @@ def validate_file(uploaded_file) -> tuple:
     return True, "OK"
 
 def build_schema_only_context(dataframes: dict) -> str:
+    """Ultra-lean: column names + dtypes only. No sample rows sent to AI.
+    Minimises token usage to stay within Groq rate limits."""
     schema_lines = ""
     for alias, df in dataframes.items():
-        dtypes = {c: str(t) for c, t in df.dtypes.items()}
-        schema_lines += f"\n  {alias}: columns={df.columns.tolist()}, dtypes={dtypes}, shape={df.shape}"
-        if len(df) > 0:
-            sample = df.head(2).copy()
-            for col in sample.columns:
-                sample[col] = mask_sensitive_column(sample[col], col)
-            schema_lines += f"\n  {alias}_sample_masked={sample.to_dict('records')}"
+        col_info = ", ".join(f"{c}:{str(t)[:7]}" for c, t in df.dtypes.items())
+        schema_lines += f"\n  {alias} (rows={df.shape[0]:,}): {col_info}"
     return schema_lines
 
 # -----------------------------------
@@ -167,14 +164,48 @@ except ImportError:
     st.error("groq package not installed. Run: pip install groq")
     st.stop()
 
-def call_ai(messages: list, temperature: float = 0.1, max_tokens: int = 4096) -> str:
-    resp = ai_client.chat.completions.create(
-        model=AI_MODEL,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens
-    )
-    return resp.choices[0].message.content
+def call_ai(messages: list, temperature: float = 0.1, max_tokens: int = 2000,
+            model: str = None, task: str = "code") -> str:
+    """
+    Call AI with automatic exponential backoff on rate limits.
+    task=code    -> main model, 2000 tokens (ETL code generation)
+    task=summary -> fast 8b model, 500 tokens (pipeline narration)
+    task=jira    -> main model, 3500 tokens (structured JSON output)
+    """
+    use_model = model or ("llama-3.1-8b-instant" if task == "summary" else AI_MODEL)
+    token_limit = {"code": 1600, "summary": 400, "jira": 3000}.get(task, max_tokens)
+
+    MAX_RETRIES = 4
+    base_wait = 15
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            resp = ai_client.chat.completions.create(
+                model=use_model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=token_limit,
+            )
+            return resp.choices[0].message.content
+        except Exception as e:
+            err_str = str(type(e).__name__).lower() + str(e).lower()
+            is_rate_limit = any(x in err_str for x in ["rate", "429", "ratelimit", "quota", "tokens per"])
+            is_last = attempt == MAX_RETRIES - 1
+
+            if is_last:
+                if is_rate_limit:
+                    raise RuntimeError(
+                        f"Rate limit reached after {MAX_RETRIES} retries. "
+                        f"Please wait 60 seconds and try again. "
+                        f"(Groq free tier: ~6,000 output tokens/min for {use_model})"
+                    )
+                raise
+            if is_rate_limit:
+                wait = base_wait * (2 ** attempt)
+                st.warning(f"Rate limit — auto-retrying in {wait}s (attempt {attempt+1}/{MAX_RETRIES-1})...")
+                time.sleep(wait)
+            else:
+                raise
 
 # -----------------------------------
 # FULL CSS
@@ -324,30 +355,9 @@ def build_system_prompt_secure(dataframes: dict) -> str:
         join_examples = f"\n# Example multi-file join:\nresult = pd.merge({a}, {b}, on='{jcol}', how='inner')"
 
     today = datetime.datetime.now().strftime("%Y-%m-%d")
-    return f"""You are a Senior Enterprise Data Engineer. Today's date is {today}.
-
-PRIVACY NOTICE: You receive ONLY column names, dtypes, and 2 masked sample rows. Never hardcode masked/sample values.
-
-AVAILABLE DATAFRAMES (schema + masked samples):{schema_context}
-
-RULES:
-1. Use ONLY the listed dataframe aliases. Store final output in variable named 'result'.
-2. Always import pandas as pd and numpy as np (already available).
-3. Handle null/NaN values gracefully with fillna or dropna.
-4. Strip whitespace from string columns.
-5. Use vectorised operations; avoid row-level Python loops.
-6. For date filters, use pd.to_datetime() and timedelta. Reference today = pd.Timestamp('{today}').
-7. For multi-file tasks: join on common keys, then aggregate.
-8. For risk/segment calculations: use np.select() or pd.cut() rather than apply loops.
-9. Return ONLY executable Python code — no markdown fences, no explanations.
-10. Handle edge cases: empty groups, missing join keys, zero-division.
-11. For complex transformations with multiple joins + aggregations:
-    - Step 1: Filter/clean each dataframe
-    - Step 2: Join dataframes
-    - Step 3: Compute aggregations
-    - Step 4: Apply derived columns
-    - Step 5: Select final columns, sort, assign to 'result'
-{join_examples}"""
+    return f"""You are an expert data engineer. Today={today}.
+DATAFRAMES (column:dtype):{schema_context}
+RULES: Use only listed aliases. Output assigned to 'result'. pd/np/re/datetime pre-imported. Use pd.Timestamp('{today}') for date math. No markdown. No explanations. Vectorised ops only. fillna(0) after joins. np.select() for conditionals. Store final DataFrame in 'result'.{join_examples}"""
 
 
 def make_gde_html(dataframes, file_names, code, result_df, state,
@@ -431,7 +441,7 @@ Input files: {file_names}, Rows before: {original_rows}, Rows after: {len(result
 Each step starts with: Loaded, Joined, Filtered, Cleaned, Computed, Aggregated, Ranked, Sorted, Flagged, Selected.
 Return ONLY a JSON array of strings: ["Step one", "Step two"]. No markdown, no other text."""
     try:
-        raw = call_ai([{"role": "user", "content": summary_prompt}], temperature=0.2)
+        raw = call_ai([{"role": "user", "content": summary_prompt}], temperature=0.2, task="summary")
         arr_match = re.search(r"\[.*\]", raw, re.DOTALL)
         steps = json.loads(arr_match.group()) if arr_match else [raw]
     except Exception:
@@ -805,11 +815,26 @@ with tab1:
             aliases_list = [f"df{i+1}" for i in range(len(uploaded_files))]
             st.info(f"**{len(uploaded_files)} files loaded.** Reference as: {', '.join(f'`{a}`' for a in aliases_list)}")
 
+    with st.expander("ℹ️ Groq Rate Limits & Tips", expanded=False):
+        st.markdown("""
+<div style="font-size:12px;color:#333;line-height:1.8;">
+<b>Why might I see a rate limit error?</b><br>
+Groq's free tier allows ~6,000 output tokens/minute. A complex 3-file ETL prompt generates ~800–1,500 tokens of Python code.
+Multiple rapid attempts can exceed this limit.<br><br>
+<b>✅ Tips to avoid rate limits:</b><br>
+• Wait 60 seconds between runs if you hit a limit (auto-retry is built in)<br>
+• The app auto-retries up to 4 times with exponential backoff (15s → 30s → 60s)<br>
+• Pipeline summary uses a faster model (llama-3.1-8b) to save quota<br>
+• Use <b>Groq paid tier</b> for higher limits in production<br><br>
+<b>Current models used:</b> ETL code → <code>llama-3.3-70b-versatile</code> &nbsp;|&nbsp; Summary → <code>llama-3.1-8b-instant</code>
+</div>
+""", unsafe_allow_html=True)
+
     run_col, hint_col = st.columns([1, 3])
     with run_col:
         run_btn = st.button("▶ Execute ETL", key="run_etl", use_container_width=True)
     with hint_col:
-        st.markdown("<div style='font-size:11px;color:#888;padding-top:10px;'>Supports multi-file joins, aggregations, filters, date windows, risk scoring, segmentation, pivots, and more.</div>", unsafe_allow_html=True)
+        st.markdown("<div style='font-size:11px;color:#888;padding-top:10px;'>Auto-retries on rate limits. Supports multi-file joins, aggregations, date windows, risk scoring, segmentation, pivots, and more.</div>", unsafe_allow_html=True)
 
     if run_btn:
         if not etl_prompt_raw.strip():
@@ -881,7 +906,7 @@ with tab1:
                 if last_error and attempt > 1:
                     conversation.append({"role": "assistant", "content": ai_code})
                     conversation.append({"role": "user", "content": f"Attempt {attempt-1} raised:\n{last_error}\nFix it. Store result in 'result'. No markdown fences."})
-                ai_code = call_ai(conversation, temperature=0.05)
+                ai_code = call_ai(conversation, temperature=0.05, task="code")
                 try:
                     # ✅ KEY FIX: execute AI code on ORIGINAL unmasked dataframes
                     # AI only saw schema — code references column names not values
@@ -892,8 +917,20 @@ with tab1:
                 except Exception as exc:
                     last_error = str(exc)
                     if attempt == MAX_ATTEMPTS:
-                        st.error(f"ETL failed after {MAX_ATTEMPTS} attempts:\n\n{exc}")
-                        st.code(extract_code(ai_code), language="python")
+                        err_msg = str(exc)
+                        is_rate = any(x in err_msg.lower() for x in ["rate limit", "rate_limit", "429", "quota", "tokens per"])
+                        if is_rate:
+                            st.error("""
+⏱️ **Groq Rate Limit Reached**
+
+The AI API is temporarily rate-limited. **Wait 60 seconds** then try again.
+The app will auto-retry up to 4x with backoff on the next run.
+
+*Tip: Reduce prompt complexity or upgrade to Groq paid tier for production.*
+""")
+                        else:
+                            st.error(f"ETL failed after {MAX_ATTEMPTS} attempts:\n\n{exc}")
+                            st.code(extract_code(ai_code), language="python")
                         transformed_df = list(dataframes_original.values())[0].copy()
 
         gde_slot.markdown(make_gde_html(dataframes_original, file_names, extract_code(ai_code), transformed_df, "done", masked_cols=all_masked_cols), unsafe_allow_html=True)
@@ -1014,7 +1051,7 @@ with tab2:
             audit_log("JIRA_QUERY", SESSION_ID, f"Project={project_type}, Team={team_size}", "LOW")
             raw_output = call_ai(
                 [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_prompt}],
-                temperature=0.3, max_tokens=4000
+                temperature=0.3, task="jira"
             )
 
         try:
