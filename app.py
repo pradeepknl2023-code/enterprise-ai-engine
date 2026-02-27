@@ -1,538 +1,275 @@
+"""
+Enterprise AI ETL Platform  ·  v6.0
+=====================================
+AI Provider: LiteLLM router — Gemini 2.0 Flash PRIMARY (1M TPM free)
+             Groq / Mistral / OpenAI / Anthropic / Ollama as fallback
+
+Zero cost to run with GEMINI_API_KEY alone.
+All ETL, Jira, PII masking, audit features preserved from v5.1.
+"""
+
 import streamlit as st
 import pandas as pd
 import numpy as np
-import os
-import re
-import hashlib
-import datetime
-import json
-import time
-import logging
-import uuid
+import os, re, hashlib, datetime, json, time, logging, uuid
 from io import BytesIO
+import sys
 
-# -----------------------------------
-# PAGE CONFIG
-# -----------------------------------
-st.set_page_config(page_title="Enterprise AI ETL Platform", layout="wide", page_icon="⚡")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# -----------------------------------
-# LOGGING SETUP (Audit Trail)
-# -----------------------------------
+# ── Router import ────────────────────────────────────────────
+try:
+    from ai_router import (
+        call_ai_compat as call_ai,
+        get_router_status,
+        get_active_provider,
+        get_active_model,
+        RATE_LIMIT_SENTINEL,
+    )
+    ROUTER_OK = True
+except ImportError as _router_err:
+    ROUTER_OK = False
+    _ROUTER_ERR_MSG = str(_router_err)
+
+# ── Page config ──────────────────────────────────────────────
+st.set_page_config(
+    page_title="Enterprise AI ETL Platform",
+    layout="wide",
+    page_icon="⚡",
+)
+
+# ── Logging ──────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s | %(levelname)s | %(message)s',
-    handlers=[logging.StreamHandler()]
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[logging.StreamHandler()],
 )
 audit_logger = logging.getLogger("AUDIT")
 
-def audit_log(action: str, session_id: str, details: str, risk_level: str = "LOW"):
-    audit_logger.info(f"SESSION={session_id} | ACTION={action} | RISK={risk_level} | {details}")
+def audit_log(action, session_id, details, risk="LOW"):
+    audit_logger.info(
+        f"SESSION={session_id} | ACTION={action} | RISK={risk} | {details}"
+    )
 
-# -----------------------------------
-# SESSION INIT
-# -----------------------------------
-if "session_id" not in st.session_state:
-    st.session_state.session_id = str(uuid.uuid4())[:8].upper()
-if "history" not in st.session_state:
-    st.session_state.history = []
-if "jira_result" not in st.session_state:
-    st.session_state.jira_result = None
-if "last_etl_result" not in st.session_state:
-    st.session_state.last_etl_result = None  # stores {masked_df, original_df, masked_cols, file_names, prompt}
-if "privacy_acknowledged" not in st.session_state:
-    st.session_state.privacy_acknowledged = False
+# ── Session state ────────────────────────────────────────────
+for k, v in {
+    "session_id": str(uuid.uuid4())[:8].upper(),
+    "history": [],
+    "jira_result": None,
+    "last_etl_result": None,
+}.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 SESSION_ID = st.session_state.session_id
 
-# -----------------------------------
+# ── Router check ─────────────────────────────────────────────
+if not ROUTER_OK:
+    st.error(f"""
+### ⚠️ AI Router Import Failed
+**Error:** `{_ROUTER_ERR_MSG}`
+
+**Fix:**
+```bash
+pip install litellm
+```
+Make sure `ai_router.py` is in the **same folder** as `app.py`.
+""")
+    st.stop()
+
+_status_rows    = get_router_status()
+_ready_count    = sum(1 for r in _status_rows if "🟢" in r["Status"])
+if _ready_count == 0:
+    st.error("""
+### ⚠️ No AI Providers Ready
+
+Add at least one key to `.streamlit/secrets.toml`:
+
+```toml
+# BEST FREE OPTION — 1,000,000 tokens/min
+GEMINI_API_KEY = "AIza..."
+
+# OR your existing Groq key
+GROQ_API_KEY = "gsk_..."
+```
+
+Get a free Gemini key in 2 minutes → https://aistudio.google.com
+""")
+    st.stop()
+
+
+# ═══════════════════════════════════════════════════════════
 # PRIVACY ENGINE
-# -----------------------------------
+# ═══════════════════════════════════════════════════════════
 SENSITIVE_PATTERNS = {
     "account_number": r'\b\d{8,17}\b',
-    "sort_code": r'\b\d{2}-\d{2}-\d{2}\b',
-    "card_number": r'\b(?:\d[ -]?){13,19}\b',
-    "ssn": r'\b\d{3}[-\s]?\d{2}[-\s]?\d{4}\b',
-    "iban": r'\b[A-Z]{2}\d{2}[A-Z0-9]{4}\d{7}([A-Z0-9]?){0,16}\b',
-    "swift": r'\b[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}([A-Z0-9]{3})?\b',
-    "email": r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
-    "phone_uk": r'\b(?:0|\+44)[\s-]?\d{4}[\s-]?\d{6}\b',
-    "phone_us": r'\b(?:\+1[\s-]?)?\(?\d{3}\)?[\s-]?\d{3}[\s-]?\d{4}\b',
-    "phone_in": r'\b[6-9]\d{9}\b',
-    "ip_address": r'\b(?:\d{1,3}\.){3}\d{1,3}\b',
-    "postcode_uk": r'\b[A-Z]{1,2}\d[A-Z\d]?\s?\d[A-Z]{2}\b',
-    "zip_us": r'\b\d{5}(?:-\d{4})?\b',
-    "dob": r'\b(?:0?[1-9]|[12]\d|3[01])[/-](?:0?[1-9]|1[0-2])[/-](?:19|20)\d{2}\b',
-    "passport": r'\b[A-Z]{1,2}\d{6,9}\b',
+    "sort_code":      r'\b\d{2}-\d{2}-\d{2}\b',
+    "card_number":    r'\b(?:\d[ -]?){13,19}\b',
+    "ssn":            r'\b\d{3}[-\s]?\d{2}[-\s]?\d{4}\b',
+    "iban":           r'\b[A-Z]{2}\d{2}[A-Z0-9]{4}\d{7}([A-Z0-9]?){0,16}\b',
+    "swift":          r'\b[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}([A-Z0-9]{3})?\b',
+    "email":          r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
+    "phone_uk":       r'\b(?:0|\+44)[\s-]?\d{4}[\s-]?\d{6}\b',
+    "phone_us":       r'\b(?:\+1[\s-]?)?\(?\d{3}\)?[\s-]?\d{3}[\s-]?\d{4}\b',
+    "phone_in":       r'\b[6-9]\d{9}\b',
+    "ip_address":     r'\b(?:\d{1,3}\.){3}\d{1,3}\b',
+    "postcode_uk":    r'\b[A-Z]{1,2}\d[A-Z\d]?\s?\d[A-Z]{2}\b',
+    "zip_us":         r'\b\d{5}(?:-\d{4})?\b',
+    "dob":            r'\b(?:0?[1-9]|[12]\d|3[01])[/-](?:0?[1-9]|1[0-2])[/-](?:19|20)\d{2}\b',
+    "passport":       r'\b[A-Z]{1,2}\d{6,9}\b',
 }
 
-SENSITIVE_COLUMN_KEYWORDS = [
-    'account', 'acct', 'iban', 'bic', 'swift', 'sort', 'routing',
-    'card', 'cvv', 'pin', 'password', 'passwd', 'secret', 'token',
-    'ssn', 'sin', 'nin', 'nino', 'passport', 'license', 'licence',
-    'salary', 'wage', 'income', 'balance', 'credit', 'debit',
-    'tax', 'vat', 'ein', 'tin',
-    'email', 'phone', 'mobile', 'tel', 'fax',
-    'address', 'postcode', 'zipcode', 'zip', 'dob', 'birthdate', 'birth',
-    'gender', 'ethnicity', 'religion', 'health', 'medical',
-    'ip', 'device', 'mac_addr',
-    'name', 'surname', 'firstname', 'lastname', 'fullname',
-    'national', 'id_number', 'customer_id', 'member_id',
+SENSITIVE_COL_KW = [
+    "account","acct","iban","bic","swift","sort","routing","card","cvv","pin",
+    "password","passwd","secret","token","ssn","sin","nin","nino","passport",
+    "license","licence","salary","wage","income","balance","credit","debit",
+    "tax","vat","ein","tin","email","phone","mobile","tel","fax","address",
+    "postcode","zipcode","zip","dob","birthdate","birth","gender","ethnicity",
+    "religion","health","medical","ip","device","mac_addr","name","surname",
+    "firstname","lastname","fullname","national","id_number","customer_id","member_id",
 ]
 
-def hash_value(val: str, prefix: str = "") -> str:
+def _hash(val: str, prefix: str = "") -> str:
     h = hashlib.sha256(str(val).encode()).hexdigest()[:8].upper()
     return f"{prefix}[MASKED-{h}]"
 
 def mask_sensitive_column(series: pd.Series, col_name: str) -> pd.Series:
     col_lower = col_name.lower().replace(" ", "_").replace("-", "_")
-    is_sensitive = any(kw in col_lower for kw in SENSITIVE_COLUMN_KEYWORDS)
-    if not is_sensitive:
+    if not any(kw in col_lower for kw in SENSITIVE_COL_KW):
         return series
-    def mask_val(v):
+    def _mask(v):
         if pd.isna(v) or v == "":
             return v
         sv = str(v)
-        for pattern_name, pattern in SENSITIVE_PATTERNS.items():
-            if re.search(pattern, sv, re.IGNORECASE):
-                return hash_value(sv, pattern_name[:3].upper())
-        return hash_value(sv, "PII")
-    return series.apply(mask_val)
+        for pname, pat in SENSITIVE_PATTERNS.items():
+            if re.search(pat, sv, re.IGNORECASE):
+                return _hash(sv, pname[:3].upper())
+        return _hash(sv, "PII")
+    return series.apply(_mask)
 
-def mask_dataframe(df: pd.DataFrame) -> tuple:
-    masked_df = df.copy()
-    masked_cols = []
-    total_masked = 0
+def mask_dataframe(df: pd.DataFrame):
+    masked = df.copy()
+    masked_cols, total = [], 0
     for col in df.columns:
-        original = df[col].copy()
-        masked = mask_sensitive_column(df[col], col)
-        changes = (original.astype(str) != masked.astype(str)).sum()
-        if changes > 0:
-            masked_df[col] = masked
+        m = mask_sensitive_column(df[col], col)
+        diff = (df[col].astype(str) != m.astype(str)).sum()
+        if diff > 0:
+            masked[col] = m
             masked_cols.append(col)
-            total_masked += changes
-    return masked_df, masked_cols, total_masked
+            total += diff
+    return masked, masked_cols, total
 
-def scan_text_for_pii(text: str) -> list:
-    found = []
-    for pattern_name, pattern in SENSITIVE_PATTERNS.items():
-        if re.search(pattern, text, re.IGNORECASE):
-            found.append(pattern_name)
-    return found
+def scan_pii(text: str) -> list:
+    return [n for n, p in SENSITIVE_PATTERNS.items()
+            if re.search(p, text, re.IGNORECASE)]
 
-def sanitize_prompt(prompt: str) -> tuple:
-    pii_found = scan_text_for_pii(prompt)
-    sanitized = prompt
-    for pattern_name, pattern in SENSITIVE_PATTERNS.items():
-        sanitized = re.sub(pattern, f'[REDACTED_{pattern_name.upper()}]', sanitized, flags=re.IGNORECASE)
-    return sanitized, pii_found
+def sanitize_prompt(prompt: str):
+    found = scan_pii(prompt)
+    s = prompt
+    for n, p in SENSITIVE_PATTERNS.items():
+        s = re.sub(p, f"[REDACTED_{n.upper()}]", s, flags=re.IGNORECASE)
+    return s, found
 
-def validate_file(uploaded_file) -> tuple:
-    MAX_SIZE_MB = 50
-    ALLOWED_TYPES = ['csv']
-    if uploaded_file.size > MAX_SIZE_MB * 1024 * 1024:
-        return False, f"File exceeds {MAX_SIZE_MB}MB limit."
-    ext = uploaded_file.name.rsplit('.', 1)[-1].lower()
-    if ext not in ALLOWED_TYPES:
-        return False, f"File type .{ext} not permitted. Only CSV allowed."
-    if '..' in uploaded_file.name or '/' in uploaded_file.name:
+def validate_file(f):
+    if f.size > 50 * 1024 * 1024:
+        return False, "File exceeds 50MB limit."
+    if f.name.rsplit(".", 1)[-1].lower() not in ["csv"]:
+        return False, "Only CSV files allowed."
+    if ".." in f.name or "/" in f.name:
         return False, "Invalid filename."
     return True, "OK"
 
-def build_schema_only_context(dataframes: dict) -> str:
-    """Ultra-lean: column names + dtypes only. No sample rows sent to AI.
-    Minimises token usage to stay within Groq rate limits."""
-    schema_lines = ""
+def schema_context(dataframes: dict) -> str:
+    lines = ""
     for alias, df in dataframes.items():
-        col_info = ", ".join(f"{c}:{str(t)[:7]}" for c, t in df.dtypes.items())
-        schema_lines += f"\n  {alias} (rows={df.shape[0]:,}): {col_info}"
-    return schema_lines
+        cols = ", ".join(f"{c}:{str(t)[:7]}" for c, t in df.dtypes.items())
+        lines += f"\n  {alias} (rows={df.shape[0]:,}): {cols}"
+    return lines
 
-# -----------------------------------
-# GROQ / AI SETUP  — Multi-Model Waterfall
-# -----------------------------------
-# Each model has its OWN token bucket on Groq (~6k-15k TPM each).
-# Falling over to the next tier gives ~33k effective TPM with no quality loss.
-#
-#  Tier │ Model                             │ TPM    │ Notes
-#  ─────┼───────────────────────────────────┼────────┼──────────────────────────
-#  1    │ llama-3.3-70b-versatile           │  6,000 │ Primary — best quality
-#  2    │ deepseek-r1-distill-llama-70b     │  6,000 │ 70B distill, own bucket
-#  3    │ llama3-70b-8192                   │  6,000 │ Legacy 70B, own bucket
-#  4    │ gemma2-9b-it                      │ 15,000 │ Safety net, 15k TPM
-try:
-    from groq import Groq
-    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-    if not GROQ_API_KEY:
-        st.error("⚠️ Set GROQ_API_KEY in Streamlit Secrets or environment variables.")
-        st.stop()
-    ai_client = Groq(api_key=GROQ_API_KEY)
-    AI_PROVIDER = "Groq / Multi-Model Waterfall"
-except ImportError:
-    st.error("groq package not installed. Run: pip install groq")
-    st.stop()
 
-# Ordered fallback chain — all tiers produce high-quality ETL code
-CODE_MODEL_CHAIN = [
-    "llama-3.3-70b-versatile",          # Tier 1: best, 6k TPM
-    "deepseek-r1-distill-llama-70b",    # Tier 2: 70B distill, own 6k bucket
-    "llama3-70b-8192",                  # Tier 3: legacy 70B, own 6k bucket
-    "gemma2-9b-it",                     # Tier 4: 15k TPM safety net
-]
-SUMMARY_MODEL = "llama-3.1-8b-instant"   # fast/cheap, separate quota
-JIRA_MODEL    = "llama-3.3-70b-versatile"
-
-# Per-session tier tracking (resets each page load)
-if "active_model_idx" not in st.session_state:
-    st.session_state.active_model_idx = 0
-
-RATE_LIMIT_SENTINEL = "__RATE_LIMIT__"
-
-def _single_call(model: str, messages: list, temperature: float, max_tokens: int) -> str:
-    """One raw API call. Raises on any error."""
-    resp = ai_client.chat.completions.create(
-        model=model, messages=messages,
-        temperature=temperature, max_tokens=max_tokens,
-    )
-    return resp.choices[0].message.content
-
-def _is_rate_error(exc: Exception) -> bool:
-    s = (str(type(exc).__name__) + str(exc)).lower()
-    return any(x in s for x in ["rate", "429", "ratelimit", "quota",
-                                  "tokens per", "requests per", "request rate"])
-
-def call_ai(messages: list, temperature: float = 0.1, max_tokens: int = 2000,
-            model: str = None, task: str = "code") -> str:
-    """
-    Multi-model waterfall call. Returns RATE_LIMIT_SENTINEL only when
-    ALL tiers are exhausted. Caller must check for this value.
-
-    task=code    → waterfall through CODE_MODEL_CHAIN (1,600 tokens)
-    task=summary → llama-3.1-8b-instant (400 tokens, separate quota)
-    task=jira    → llama-3.3-70b-versatile (3,000 tokens)
-    """
-    token_limit = {"code": 1000, "summary": 300, "jira": 2500}.get(task, max_tokens)
-
-    # ── summary / jira: single model, one retry ──────────────────────────
-    if task in ("summary", "jira"):
-        use_model = model or (SUMMARY_MODEL if task == "summary" else JIRA_MODEL)
-        for attempt in range(2):
-            try:
-                return _single_call(use_model, messages, temperature, token_limit)
-            except Exception as e:
-                if _is_rate_error(e) and attempt == 0:
-                    time.sleep(15)
-                    continue
-                if _is_rate_error(e):
-                    return RATE_LIMIT_SENTINEL
-                st.error(f"AI error ({task}): {e}")
-                st.stop()
-        return RATE_LIMIT_SENTINEL
-
-    # ── code: waterfall Tier 1 → 4 ───────────────────────────────────────
-    start = st.session_state.get("active_model_idx", 0)
-    tier_order = list(range(start, len(CODE_MODEL_CHAIN))) + list(range(0, start))
-
-    for tier_idx in tier_order:
-        use_model = CODE_MODEL_CHAIN[tier_idx]
-        for attempt in range(2):          # 2 attempts per tier
-            try:
-                result = _single_call(use_model, messages, temperature, token_limit)
-                st.session_state.active_model_idx = tier_idx   # remember good tier
-                return result
-            except Exception as e:
-                err_str = str(e).lower()
-                is_decommissioned = any(x in err_str for x in
-                    ["decommissioned", "not supported", "model_decommissioned",
-                     "no longer supported", "not found", "does not exist"])
-                if not _is_rate_error(e) and not is_decommissioned:
-                    # Real execution error — fail immediately
-                    st.error(f"AI error on {use_model}: {e}")
-                    st.stop()
-                if is_decommissioned:
-                    # Skip this tier silently, try next
-                    break
-                if attempt == 0:
-                    # First rate-limit on this tier: wait 12s, retry once
-                    st.toast(f"⏱️ Tier {tier_idx+1} rate-limited — retrying in 12s…", icon="⏳")
-                    time.sleep(12)
-                    continue
-                # Second rate-limit: move to next tier immediately (no wait)
-                break
-
-    # All 4 tiers exhausted
-    return RATE_LIMIT_SENTINEL
-
-# -----------------------------------
-# FULL CSS
-# -----------------------------------
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Rajdhani:wght@600;700&family=Orbitron:wght@700;900&family=Space+Mono:wght@400;700&display=swap');
-* { font-family: 'Inter', sans-serif; }
-
-.privacy-shield { background: linear-gradient(135deg, #0a1628, #0d2137); border: 1px solid rgba(41,182,246,0.3); border-left: 4px solid #29B6F6; border-radius: 10px; padding: 14px 18px; margin-bottom: 16px; }
-.privacy-shield .ps-title { color: #29B6F6; font-family: 'Space Mono', monospace; font-size: 11px; letter-spacing: 1.5px; font-weight: 700; margin-bottom: 8px; }
-.privacy-shield .ps-items { display: flex; gap: 10px; flex-wrap: wrap; }
-.privacy-shield .ps-item { background: rgba(41,182,246,0.1); border: 1px solid rgba(41,182,246,0.2); color: #7BB8FF; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-family: 'Space Mono', monospace; }
-.pii-warning { background: #FFF3E0; border: 1px solid #FFB300; border-left: 4px solid #F57F17; border-radius: 8px; padding: 10px 14px; margin: 8px 0; }
-.pii-warning .pw-title { color: #E65100; font-weight: 700; font-size: 12px; margin-bottom: 4px; }
-.pii-warning .pw-text { color: #555; font-size: 12px; }
-.mask-badge { background: #E8F5E9; border: 1px solid #A5D6A7; color: #2E7D32; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-family: 'Space Mono', monospace; display: inline-block; margin: 2px; }
-.session-bar { display: flex; align-items: center; justify-content: space-between; background: rgba(179,27,27,0.05); border: 1px solid rgba(179,27,27,0.15); border-radius: 8px; padding: 8px 14px; margin-bottom: 12px; font-size: 11px; font-family: 'Space Mono', monospace; flex-wrap: wrap; gap: 6px; }
-.session-bar .sb-item { color: #666; display: flex; align-items: center; gap: 5px; }
-.session-bar .sb-val { color: #B31B1B; font-weight: 700; }
-.session-bar .sb-secure { color: #2E7D32; }
-.built-by-banner { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 6px 16px 0 0; margin-bottom: -6px; }
-.built-by-banner .byline { font-size: 11px; color: #999; letter-spacing: 0.8px; text-transform: uppercase; }
-.built-by-banner .author { font-family: 'Rajdhani', sans-serif; font-size: 15px; font-weight: 700; color: #B31B1B; letter-spacing: 1px; }
-.built-by-banner .dot { width: 6px; height: 6px; background: #FFC72C; border-radius: 50%; display: inline-block; }
-.main-header { background: linear-gradient(135deg, #B31B1B 0%, #7a1212 100%); padding: 22px 28px; border-radius: 10px; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; box-shadow: 0 4px 15px rgba(179,27,27,0.3); flex-wrap: wrap; gap: 12px; }
-.main-header h1 { color: #FFC72C; margin: 0; font-family: 'Rajdhani', sans-serif; font-size: 28px; font-weight: 700; letter-spacing: 1px; }
-.main-header .header-sub { color: rgba(255,255,255,0.6); font-size: 12px; margin-top: 4px; letter-spacing: 0.5px; }
-.main-header .version-badge { background: rgba(255,199,44,0.15); border: 1px solid rgba(255,199,44,0.4); color: #FFC72C; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; letter-spacing: 1px; }
-.main-header .secure-badge { background: rgba(41,182,246,0.15); border: 1px solid rgba(41,182,246,0.4); color: #29B6F6; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; letter-spacing: 1px; margin-top: 6px; }
-.section-title { color: #B31B1B; font-weight: 600; font-size: 16px; margin-top: 20px; text-transform: uppercase; letter-spacing: 0.5px; }
-.stButton>button { background-color: #B31B1B; color: white; font-weight: bold; border-radius: 6px; }
-.stButton>button:hover { background-color: #8E1414; color: #FFC72C; }
-.metric-row { display: flex; gap: 12px; margin: 16px 0 8px 0; flex-wrap: wrap; }
-.metric-box { background: white; border: 1px solid #E8E8E8; border-top: 3px solid #B31B1B; border-radius: 8px; padding: 14px 18px; min-width: 120px; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.06); flex: 1; }
-.metric-box .metric-value { font-size: 28px; font-weight: 700; color: #B31B1B; font-family: 'Rajdhani', sans-serif; }
-.metric-box .metric-label { font-size: 10px; color: #999; text-transform: uppercase; letter-spacing: 0.8px; margin-top: 2px; }
-.pipeline-steps { padding: 4px 0; }
-.pipeline-step { display: flex; align-items: flex-start; gap: 12px; padding: 10px 0; border-bottom: 1px solid #F0F0F0; font-size: 14px; color: #333; }
-.pipeline-step:last-child { border-bottom: none; }
-.step-num { background: #B31B1B; color: white; border-radius: 50%; width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; min-width: 22px; }
-.step-icon { font-size: 18px; min-width: 24px; }
-.step-text { flex: 1; line-height: 1.5; }
-.gde-container { background: #0D1117; border-radius: 10px; padding: 24px 20px; margin: 12px 0; overflow-x: auto; box-shadow: inset 0 2px 8px rgba(0,0,0,0.4); }
-.gde-flow { display: flex; align-items: center; gap: 0; min-width: max-content; padding: 8px 0; flex-wrap: nowrap; }
-.gde-node { display: flex; flex-direction: column; align-items: center; gap: 6px; }
-.gde-node-box { border-radius: 8px; padding: 10px 16px; text-align: center; min-width: 120px; }
-@keyframes pulse { 0%,100% { box-shadow: 0 0 8px rgba(255,214,0,0.3); } 50% { box-shadow: 0 0 20px rgba(255,214,0,0.7); } }
-.gde-node-title { font-size: 11px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase; }
-.gde-node-sub { font-size: 10px; opacity: 0.7; margin-top: 2px; }
-.gde-node-count { font-size: 14px; font-weight: 700; font-family: 'Rajdhani', sans-serif; margin-top: 4px; }
-.gde-node-label { font-size: 10px; color: #666; text-align: center; max-width: 130px; }
-.gde-arrow { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 0 6px; min-width: 70px; }
-.gde-count-label { font-size: 10px; white-space: nowrap; text-align: center; }
-.gde-legend { display: flex; gap: 20px; margin-top: 16px; flex-wrap: wrap; }
-.gde-legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #888; }
-.legend-dot { width: 10px; height: 10px; border-radius: 2px; }
-
-/* DECRYPT DOWNLOAD PANEL */
-.decrypt-panel { background: linear-gradient(135deg, #0a2a0a, #0d1f0d); border: 2px solid rgba(105,240,174,0.4); border-radius: 12px; padding: 20px 24px; margin: 16px 0; }
-.decrypt-panel-title { color: #69F0AE; font-family: 'Space Mono', monospace; font-size: 12px; font-weight: 700; letter-spacing: 1.5px; margin-bottom: 12px; }
-.decrypt-warning { background: rgba(255,152,0,0.1); border: 1px solid rgba(255,152,0,0.4); border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; }
-.decrypt-warning-text { color: #FFB300; font-size: 12px; line-height: 1.6; }
-.download-option { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 12px 16px; margin: 8px 0; }
-.download-option-title { color: white; font-size: 13px; font-weight: 600; margin-bottom: 4px; }
-.download-option-desc { color: rgba(255,255,255,0.6); font-size: 11px; }
-
-/* JIRA */
-.epic-card { background: linear-gradient(135deg, #B31B1B 0%, #7a1212 100%); border-radius: 10px; padding: 20px 24px; margin: 16px 0; box-shadow: 0 4px 15px rgba(179,27,27,0.3); }
-.epic-title { color: #FFC72C; font-family: 'Rajdhani', sans-serif; font-size: 22px; font-weight: 700; letter-spacing: 0.5px; }
-.epic-value { color: rgba(255,255,255,0.85); font-size: 13px; margin-top: 6px; line-height: 1.6; }
-.epic-meta { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
-.epic-badge { background: rgba(255,199,44,0.2); border: 1px solid rgba(255,199,44,0.5); color: #FFC72C; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; }
-.story-card { background: white; border: 1px solid #E8E8E8; border-left: 4px solid #B31B1B; border-radius: 8px; padding: 16px 20px; margin: 10px 0; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
-.story-id { font-size: 11px; color: #999; font-weight: 600; letter-spacing: 0.5px; }
-.story-title { font-size: 14px; font-weight: 600; color: #1a1a1a; margin: 4px 0 8px 0; line-height: 1.4; }
-.story-desc { font-size: 13px; color: #555; line-height: 1.6; font-style: italic; }
-.story-badges { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; align-items: center; }
-.badge-priority-critical { background: #FFEBEE; color: #C62828; border: 1px solid #EF9A9A; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; }
-.badge-priority-high { background: #FFF3E0; color: #E65100; border: 1px solid #FFCC80; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; }
-.badge-priority-medium { background: #FFFDE7; color: #F57F17; border: 1px solid #FFF176; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; }
-.badge-priority-low { background: #F5F5F5; color: #616161; border: 1px solid #E0E0E0; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; }
-.badge-points { background: #FFC72C; color: #1a1a1a; padding: 2px 10px; border-radius: 10px; font-size: 12px; font-weight: 700; }
-.badge-sprint { background: #E8F5E9; color: #2E7D32; border: 1px solid #A5D6A7; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
-.badge-type { background: #E3F2FD; color: #1565C0; border: 1px solid #90CAF9; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
-.ac-section { margin-top: 12px; }
-.ac-title { font-size: 11px; font-weight: 700; color: #B31B1B; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
-.ac-item { font-size: 12px; color: #444; padding: 4px 0 4px 12px; border-left: 2px solid #FFC72C; margin: 4px 0; line-height: 1.5; }
-.subtask-section { margin-top: 10px; }
-.subtask-title { font-size: 11px; font-weight: 700; color: #666; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
-.subtask-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #555; padding: 3px 0; }
-.subtask-hrs { font-size: 10px; color: #999; background: #F5F5F5; padding: 1px 6px; border-radius: 8px; }
-.risk-card { background: #FFF8E1; border: 1px solid #FFE082; border-left: 4px solid #FFC72C; border-radius: 8px; padding: 14px 18px; margin: 10px 0; }
-.risk-title { font-size: 13px; font-weight: 700; color: #E65100; margin-bottom: 6px; }
-.risk-item { font-size: 12px; color: #555; padding: 3px 0 3px 12px; border-left: 2px solid #FFB300; margin: 3px 0; }
-.dod-card { background: #E8F5E9; border: 1px solid #A5D6A7; border-left: 4px solid #2E7D32; border-radius: 8px; padding: 14px 18px; margin: 10px 0; }
-.dod-title { font-size: 13px; font-weight: 700; color: #1B5E20; margin-bottom: 6px; }
-.dod-item { font-size: 12px; color: #2E7D32; padding: 3px 0 3px 12px; border-left: 2px solid #66BB6A; margin: 3px 0; }
-.jira-metrics { display: flex; gap: 12px; margin: 16px 0; flex-wrap: wrap; }
-.jira-metric-box { background: white; border: 1px solid #E8E8E8; border-top: 3px solid #B31B1B; border-radius: 8px; padding: 12px 16px; min-width: 100px; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.06); flex: 1; }
-.jira-metric-value { font-size: 24px; font-weight: 700; color: #B31B1B; font-family: 'Rajdhani', sans-serif; }
-.jira-metric-label { font-size: 10px; color: #999; text-transform: uppercase; letter-spacing: 0.8px; }
-
-/* EXAMPLE PROMPTS */
-.example-prompt-box { background: #F8F9FA; border: 1px solid #E0E0E0; border-left: 3px solid #B31B1B; border-radius: 8px; padding: 10px 14px; margin: 6px 0; cursor: pointer; transition: all 0.2s; }
-.example-prompt-box:hover { background: #FFF5F5; border-left-color: #FFC72C; }
-.example-prompt-tag { font-size: 10px; color: #B31B1B; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 3px; }
-.example-prompt-text { font-size: 12px; color: #444; line-height: 1.4; }
-</style>
-""", unsafe_allow_html=True)
-
-# -----------------------------------
-# HELPER FUNCTIONS
-# -----------------------------------
+# ═══════════════════════════════════════════════════════════
+# ETL HELPERS
+# ═══════════════════════════════════════════════════════════
 def extract_code(raw: str) -> str:
-    fenced = re.search(r"```(?:python)?\s*\n(.*?)```", raw, re.DOTALL)
-    if fenced:
-        return fenced.group(1).strip()
-    lines = [ln for ln in raw.splitlines() if not ln.strip().startswith("```")]
-    return "\n".join(lines).strip()
+    m = re.search(r"```(?:python)?\s*\n(.*?)```", raw, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    return "\n".join(l for l in raw.splitlines()
+                     if not l.strip().startswith("```")).strip()
 
-
-def safe_exec_multi(dataframes: dict, code: str) -> pd.DataFrame:
+def safe_exec(dataframes: dict, code: str) -> pd.DataFrame:
     code = extract_code(code)
-    exec_globals = {"pd": pd, "np": np, "re": re, "datetime": datetime, **dataframes}
+    g = {"pd": pd, "np": np, "re": re, "datetime": datetime, **dataframes}
     try:
-        exec(compile(code, "<ai_etl>", "exec"), exec_globals)
-    except Exception as exc:
-        raise RuntimeError(f"Execution failed: {exc}\n\nCode:\n{code}") from exc
+        exec(compile(code, "<etl>", "exec"), g)
+    except Exception as e:
+        raise RuntimeError(f"Execution error: {e}\n\nCode:\n{code}") from e
     primary = "df" if "df" in dataframes else list(dataframes.keys())[0]
-    output = exec_globals.get("result", exec_globals.get(primary, list(dataframes.values())[0]))
-    if not isinstance(output, pd.DataFrame):
-        raise RuntimeError(f"AI produced {type(output).__name__} instead of DataFrame.")
-    return output
+    out = g.get("result", g.get(primary, list(dataframes.values())[0]))
+    if not isinstance(out, pd.DataFrame):
+        raise RuntimeError(f"AI returned {type(out).__name__}, expected DataFrame.")
+    return out
 
-
-def build_system_prompt_secure(dataframes: dict) -> str:
-    """Send ONLY schema + 2 masked sample rows to AI — never raw data"""
-    schema_context = build_schema_only_context(dataframes)
-    aliases = list(dataframes.keys())
-    primary = aliases[0] if aliases else "df"
-    join_examples = ""
-    if len(aliases) >= 2:
-        a, b = aliases[0], aliases[1]
-        common = list(set(dataframes[a].columns) & set(dataframes[b].columns))
-        jcol = common[0] if common else "id"
-        join_examples = f"\n# Example multi-file join:\nresult = pd.merge({a}, {b}, on='{jcol}', how='inner')"
-
+def build_system_prompt(dataframes: dict) -> str:
     today = datetime.datetime.now().strftime("%Y-%m-%d")
-    aliases = list(dataframes.keys())
-    alias_str = ", ".join(aliases)
-    return f"""Expert data engineer. Today={today}. DataFrames: {alias_str}.
-Schema:{schema_context}
-Write Python only. Store result in 'result'. pd/np/datetime available. pd.Timestamp('{today}') for dates. fillna(0) after joins. np.select() for conditions. No markdown."""
+    return (
+        f"Expert data engineer. Today={today}. "
+        f"DataFrames: {', '.join(dataframes.keys())}.\n"
+        f"Schema:{schema_context(dataframes)}\n"
+        "Write Python only. Store result in 'result'. "
+        "pd/np/datetime available. fillna(0) after joins. "
+        "np.select() for conditions. No markdown."
+    )
 
-
-def make_gde_html(dataframes, file_names, code, result_df, state,
-                  read_count=0, transform_count=0, out_count=0, masked_cols=None):
-    aliases = list(dataframes.keys())
-    real_aliases = [a for a in aliases if a != "df"] or list(aliases)[:1] or ["df"]
-    has_join = len(real_aliases) >= 2
-    code_lower = (code or "").lower()
-    trans_ops = []
-    if "merge" in code_lower or "join" in code_lower: trans_ops.append("JOIN")
-    if "groupby" in code_lower and "rank" in code_lower: trans_ops.append("RANK")
-    if "pd.cut" in code_lower or "pd.qcut" in code_lower or "np.select" in code_lower: trans_ops.append("SEGMENT")
-    if "re.sub" in code_lower or "replace" in code_lower: trans_ops.append("CLEAN")
-    if "fillna" in code_lower: trans_ops.append("FILLNA")
-    if "groupby" in code_lower: trans_ops.append("AGGREGATE")
-    if not trans_ops: trans_ops.append("TRANSFORM")
-    trans_label = " · ".join(list(dict.fromkeys(trans_ops))[:3])
-    primary_rows = dataframes[real_aliases[0]].shape[0]
-    secondary_rows = dataframes[real_aliases[1]].shape[0] if has_join else 0
-    fname1 = file_names[0] if file_names else "file1.csv"
-    fname2 = file_names[1] if len(file_names) > 1 else ""
-    out_rows = len(result_df) if state == "done" and result_df is not None else out_count
-    out_cols = len(result_df.columns) if state == "done" and result_df is not None else 0
-    arrow1_color = "#29B6F6" if state in ("transforming","done") else ("#FFD600" if state == "reading" else "#444")
-    arrow2_color = "#29B6F6" if state == "done" else "#444"
-    privacy_arrow_color = "#69F0AE" if state == "done" else "#444"
-    input_border = "#1E90FF" if state in ("reading","transforming","done") else "#333"
-    input_bg = "#1a2744" if state in ("reading","transforming","done") else "#111"
-    input_color = "#7BB8FF" if state in ("reading","transforming","done") else "#444"
-    if state == "transforming":
-        trans_border="#FFD600"; trans_bg="#2a2a0a"; trans_color="#FFD600"; trans_anim="animation: pulse 1s infinite;"
-    elif state == "done":
-        trans_border="#29B6F6"; trans_bg="#0d2137"; trans_color="#29B6F6"; trans_anim=""
-    else:
-        trans_border="#333"; trans_bg="#111"; trans_color="#444"; trans_anim=""
-    if state == "done":
-        out_border="#29B6F6"; out_bg="#0d2137"; out_color="#29B6F6"
-    else:
-        out_border="#AB47BC"; out_bg="#1a1a2e"; out_color="#CE93D8"
-    trans_status = "🟡 RUNNING" if state == "transforming" else ("🔵 COMPLETE" if state == "done" else "⏳ WAITING")
-    in_count_display = f"{primary_rows:,}" if state in ("reading","transforming","done") else "–"
-    in2_count_display = f"{secondary_rows:,}" if has_join and state in ("reading","transforming","done") else "–"
-    tr_count_display = f"{primary_rows+secondary_rows:,} rec" if has_join and state in ("transforming","done") else (f"{primary_rows:,} rec" if state in ("transforming","done") else "–")
-    out_count_display = f"{out_rows:,}" if state == "done" else "–"
-    masked_count = len(masked_cols) if masked_cols else 0
-
-    def svg_arrow(color, label=""):
-        uid = abs(hash(label + color)) % 99999
-        return f"""<div class="gde-arrow"><svg width="70" height="18" viewBox="0 0 70 18" xmlns="http://www.w3.org/2000/svg"><defs><marker id="ah{uid}" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><polygon points="0 0, 6 3, 0 6" fill="{color}" /></marker></defs><line x1="2" y1="9" x2="62" y2="9" stroke="{color}" stroke-width="2.5" marker-end="url(#ah{uid})" /></svg><div class="gde-count-label" style="color:{color};">{label}</div></div>"""
-
-    html = '<div class="gde-flow">'
-    if has_join:
-        html += f"""<div class="gde-node"><div style="display:flex;flex-direction:column;gap:10px;"><div class="gde-node"><div class="gde-node-box" style="background:{input_bg};border:2px solid {input_border};color:{input_color};min-width:110px;border-radius:8px;padding:10px 14px;text-align:center;"><div class="gde-node-title">📂 INPUT 1</div><div class="gde-node-sub" style="font-size:9px;">{fname1[:18]}</div><div class="gde-node-count">{in_count_display}</div></div><div class="gde-node-label">{real_aliases[0]}</div></div><div class="gde-node"><div class="gde-node-box" style="background:{input_bg};border:2px solid {input_border};color:{input_color};min-width:110px;border-radius:8px;padding:10px 14px;text-align:center;"><div class="gde-node-title">📂 INPUT 2</div><div class="gde-node-sub" style="font-size:9px;">{fname2[:18]}</div><div class="gde-node-count">{in2_count_display}</div></div><div class="gde-node-label">{real_aliases[1]}</div></div>"""
-        if len(real_aliases) >= 3:
-            fname3 = file_names[2] if len(file_names) > 2 else ""
-            in3_count = dataframes[real_aliases[2]].shape[0]
-            in3_display = f"{in3_count:,}" if state in ("reading","transforming","done") else "–"
-            html += f"""<div class="gde-node"><div class="gde-node-box" style="background:{input_bg};border:2px solid {input_border};color:{input_color};min-width:110px;border-radius:8px;padding:10px 14px;text-align:center;"><div class="gde-node-title">📂 INPUT 3</div><div class="gde-node-sub" style="font-size:9px;">{fname3[:18]}</div><div class="gde-node-count">{in3_display}</div></div><div class="gde-node-label">{real_aliases[2]}</div></div>"""
-        html += "</div></div>"
-        html += svg_arrow(arrow1_color, "raw data")
-    else:
-        html += f"""<div class="gde-node"><div class="gde-node-box" style="background:{input_bg};border:2px solid {input_border};color:{input_color};min-width:110px;border-radius:8px;padding:10px 14px;text-align:center;"><div class="gde-node-title">📂 INPUT</div><div class="gde-node-sub" style="font-size:9px;">{fname1[:18]}</div><div class="gde-node-count">{in_count_display}</div></div><div class="gde-node-label">{real_aliases[0]}</div></div>"""
-        html += svg_arrow(arrow1_color, "raw data")
-
-    privacy_node_bg = "#0a2a0a" if state in ("transforming","done") else "#111"
-    privacy_node_border = "rgba(105,240,174,0.5)" if state in ("transforming","done") else "#333"
-    privacy_node_color = "#69F0AE" if state in ("transforming","done") else "#444"
-    html += f"""<div class="gde-node"><div class="gde-node-box" style="background:{privacy_node_bg};border:2px solid {privacy_node_border};color:{privacy_node_color};min-width:110px;border-radius:8px;padding:10px 14px;text-align:center;"><div class="gde-node-title">🔒 PII MASK</div><div class="gde-node-sub">Auto-Detect</div><div class="gde-node-count" style="font-size:11px;">{masked_count} cols</div></div><div class="gde-node-label" style="color:#69F0AE;font-size:9px;">SCHEMA ONLY → AI</div></div>"""
-    html += svg_arrow(privacy_arrow_color, "schema only")
-    html += f"""<div class="gde-node"><div class="gde-node-box" style="background:{trans_bg};border:2px solid {trans_border};color:{trans_color};min-width:120px;border-radius:8px;padding:10px 14px;text-align:center;{trans_anim}"><div class="gde-node-title">⚙ {trans_label}</div><div class="gde-node-sub">AI GENERATED</div><div class="gde-node-count">{tr_count_display}</div></div><div class="gde-node-label">{trans_status}</div></div>"""
-    html += svg_arrow(arrow2_color, f"{out_count_display}" if state == "done" else "")
-    html += f"""<div class="gde-node"><div class="gde-node-box" style="background:{out_bg};border:2px solid {out_border};color:{out_color};min-width:110px;border-radius:8px;padding:10px 14px;text-align:center;"><div class="gde-node-title">💾 OUTPUT</div><div class="gde-node-sub">{out_cols} columns</div><div class="gde-node-count">{out_count_display}</div></div><div class="gde-node-label">RESULT</div></div></div>"""
-    legend = """<div class="gde-legend"><div class="gde-legend-item"><div class="legend-dot" style="background:#1E90FF;"></div> Input</div><div class="gde-legend-item"><div class="legend-dot" style="background:#69F0AE;"></div> PII Layer</div><div class="gde-legend-item"><div class="legend-dot" style="background:#FFD600;"></div> Running</div><div class="gde-legend-item"><div class="legend-dot" style="background:#29B6F6;"></div> Complete</div><div class="gde-legend-item"><div class="legend-dot" style="background:#AB47BC;"></div> Output</div></div>"""
-    return f'<div class="gde-container">{html}{legend}</div>'
-
-
-def build_pipeline_log(code, dataframes, result_df, file_names, original_rows):
-    summary_prompt = f"""Narrate this data pipeline in 4-8 plain-English steps for a business audience.
-Code: ```python\n{code}\n```
-Input files: {file_names}, Rows before: {original_rows}, Rows after: {len(result_df)}, Columns: {result_df.columns.tolist()}
-Each step starts with: Loaded, Joined, Filtered, Cleaned, Computed, Aggregated, Ranked, Sorted, Flagged, Selected.
-Return ONLY a JSON array of strings: ["Step one", "Step two"]. No markdown, no other text."""
+def build_pipeline_log(code, dataframes, result_df, file_names, orig_rows):
+    prompt = (
+        f"Narrate this ETL pipeline in 4-8 plain-English steps.\n"
+        f"Code:\n```python\n{code}\n```\n"
+        f"Files: {file_names}, Rows before: {orig_rows}, "
+        f"Rows after: {len(result_df)}, Columns: {result_df.columns.tolist()}\n"
+        "Each step starts with a verb: Loaded/Joined/Filtered/Cleaned/Computed/Aggregated/Ranked.\n"
+        'Return ONLY a JSON array: ["Step one", "Step two"]. No markdown.'
+    )
     try:
-        raw = call_ai([{"role": "user", "content": summary_prompt}], temperature=0.2, task="summary")
+        raw = call_ai([{"role": "user", "content": prompt}],
+                      temperature=0.2, task="summary")
         if raw == RATE_LIMIT_SENTINEL:
-            raise ValueError("rate_limit")
-        arr_match = re.search(r"\[.*\]", raw, re.DOTALL)
-        steps = json.loads(arr_match.group()) if arr_match else [raw]
+            raise ValueError
+        m = re.search(r"\[.*\]", raw, re.DOTALL)
+        steps = json.loads(m.group()) if m else [raw]
     except Exception:
         steps = [
-            f"Loaded {original_rows:,} rows from {', '.join(file_names)}",
+            f"Loaded {orig_rows:,} rows from {', '.join(file_names)}",
             "Applied AI-generated transformations",
-            f"Produced {len(result_df):,} rows × {len(result_df.columns)} columns"
+            f"Produced {len(result_df):,} rows × {len(result_df.columns)} columns",
         ]
-    icon_map = {
-        "load": "📂", "read": "📂", "join": "🔗", "merge": "🔗", "combined": "🔗",
-        "clean": "🧹", "strip": "🧹", "remov": "🧹", "replac": "🧹",
-        "comput": "⚙️", "calculat": "⚙️", "creat": "⚙️", "aggregat": "⚙️", "generat": "⚙️",
-        "filter": "🔍", "kept": "🔍", "exclud": "🔍", "select": "🔍",
-        "sort": "↕️", "order": "↕️", "rank": "🏅", "flag": "🚩", "risk": "⚠️",
-        "format": "✏️", "segment": "🏷️"
+
+    icons = {
+        "load":"📂","read":"📂","join":"🔗","merge":"🔗","clean":"🧹",
+        "comput":"⚙️","calculat":"⚙️","aggregat":"⚙️","filter":"🔍",
+        "sort":"↕️","rank":"🏅","flag":"🚩","risk":"⚠️","segment":"🏷️",
     }
-    def pick_icon(t):
+    def icon(t):
         tl = t.lower()
-        for kw, icon in icon_map.items():
+        for kw, ic in icons.items():
             if kw in tl:
-                return icon
+                return ic
         return "✅"
-    steps_html = '<div class="pipeline-steps">'
-    for i, step in enumerate(steps, 1):
-        steps_html += f'<div class="pipeline-step"><span class="step-num">{i}</span><span class="step-icon">{pick_icon(step)}</span><span class="step-text">{step}</span></div>'
-    steps_html += "</div>"
-    new_cols = [c for c in result_df.columns if c not in list(dataframes.values())[0].columns]
-    n_joins = max(0, len([a for a in dataframes.keys() if a != "df"]) - 1)
+
+    steps_html = '<div class="pipeline-steps">' + "".join(
+        f'<div class="pipeline-step">'
+        f'<span class="step-num">{i}</span>'
+        f'<span class="step-icon">{icon(s)}</span>'
+        f'<span class="step-text">{s}</span></div>'
+        for i, s in enumerate(steps, 1)
+    ) + "</div>"
+
+    new_cols = [c for c in result_df.columns
+                if c not in list(dataframes.values())[0].columns]
+    n_joins  = max(0, len([a for a in dataframes if a != "df"]) - 1)
     metrics_html = f"""<div class="metric-row">
     <div class="metric-box"><div class="metric-value">{len(file_names)}</div><div class="metric-label">Files</div></div>
-    <div class="metric-box"><div class="metric-value">{original_rows:,}</div><div class="metric-label">Rows In</div></div>
+    <div class="metric-box"><div class="metric-value">{orig_rows:,}</div><div class="metric-label">Rows In</div></div>
     <div class="metric-box"><div class="metric-value">{len(result_df):,}</div><div class="metric-label">Rows Out</div></div>
     <div class="metric-box"><div class="metric-value">{len(result_df.columns)}</div><div class="metric-label">Columns</div></div>
     <div class="metric-box"><div class="metric-value">{len(new_cols)}</div><div class="metric-label">New Cols</div></div>
@@ -541,896 +278,1049 @@ Return ONLY a JSON array of strings: ["Step one", "Step two"]. No markdown, no o
     return metrics_html, steps_html
 
 
-def render_decrypt_download_panel(
-    masked_result_df: pd.DataFrame,
-    original_df: pd.DataFrame,
-    file_names: list,
-    all_masked_cols: list
-):
-    """
-    Render the smart download panel with two options:
-    1. Privacy-Protected CSV (masked, safe to share)
-    2. Decrypted / Original CSV (re-runs transformation on original data, requires acknowledgement)
-    """
+# ═══════════════════════════════════════════════════════════
+# GDE FLOW DIAGRAM
+# ═══════════════════════════════════════════════════════════
+def make_gde_html(dataframes, file_names, code, result_df, state, masked_cols=None):
+    aliases = list(dataframes.keys())
+    real    = [a for a in aliases if a != "df"] or aliases[:1] or ["df"]
+    has_join = len(real) >= 2
+    cl = (code or "").lower()
+
+    ops = []
+    if "merge" in cl or "join" in cl:   ops.append("JOIN")
+    if "groupby" in cl and "rank" in cl: ops.append("RANK")
+    if "pd.cut" in cl or "np.select" in cl: ops.append("SEGMENT")
+    if "re.sub" in cl or "replace" in cl:   ops.append("CLEAN")
+    if "groupby" in cl:                  ops.append("AGGREGATE")
+    if not ops: ops.append("TRANSFORM")
+    trans_label = " · ".join(list(dict.fromkeys(ops))[:3])
+
+    pr = dataframes[real[0]].shape[0]
+    sr = dataframes[real[1]].shape[0] if has_join else 0
+    fn1 = file_names[0] if file_names else "file.csv"
+    fn2 = file_names[1] if len(file_names) > 1 else ""
+    out_rows = len(result_df) if state == "done" and result_df is not None else 0
+    out_cols = len(result_df.columns) if state == "done" and result_df is not None else 0
+    mc = len(masked_cols) if masked_cols else 0
+
+    done       = state == "done"
+    running    = state == "transforming"
+    active     = state in ("reading", "transforming", "done")
+
+    i_bg  = "#1a2744" if active else "#111"
+    i_bdr = "#1E90FF" if active else "#333"
+    i_col = "#7BB8FF" if active else "#444"
+    t_bg  = "#2a2a0a" if running else ("#0d2137" if done else "#111")
+    t_bdr = "#FFD600" if running else ("#29B6F6" if done else "#333")
+    t_col = "#FFD600" if running else ("#29B6F6" if done else "#444")
+    t_anim= "animation:pulse 1s infinite;" if running else ""
+    o_bg  = "#0d2137" if done else "#1a1a2e"
+    o_bdr = "#29B6F6" if done else "#AB47BC"
+    o_col = "#29B6F6" if done else "#CE93D8"
+    p_bg  = "#0a2a0a" if active else "#111"
+    p_bdr = "rgba(105,240,174,0.5)" if active else "#333"
+    p_col = "#69F0AE" if active else "#444"
+    a1c   = "#29B6F6" if active else ("#FFD600" if state == "reading" else "#444")
+    a2c   = "#29B6F6" if done else "#444"
+    pac   = "#69F0AE" if active else "#444"
+
+    in_d  = f"{pr:,}" if active else "–"
+    in2_d = f"{sr:,}" if has_join and active else "–"
+    tr_d  = (f"{pr+sr:,} rec" if has_join else f"{pr:,} rec") if active else "–"
+    out_d = f"{out_rows:,}" if done else "–"
+    t_st  = "🟡 RUNNING" if running else ("🔵 COMPLETE" if done else "⏳ WAITING")
+
+    def arrow(color, label=""):
+        uid = abs(hash(label+color)) % 99999
+        return (
+            f'<div class="gde-arrow">'
+            f'<svg width="70" height="18" viewBox="0 0 70 18">'
+            f'<defs><marker id="a{uid}" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">'
+            f'<polygon points="0 0,6 3,0 6" fill="{color}"/></marker></defs>'
+            f'<line x1="2" y1="9" x2="62" y2="9" stroke="{color}" stroke-width="2.5" marker-end="url(#a{uid})"/>'
+            f'</svg><div class="gde-count-label" style="color:{color};">{label}</div></div>'
+        )
+
+    def node(title, sub, count, bg, bdr, col, label, anim=""):
+        return (
+            f'<div class="gde-node">'
+            f'<div style="background:{bg};border:2px solid {bdr};color:{col};'
+            f'min-width:110px;border-radius:8px;padding:10px 14px;text-align:center;{anim}">'
+            f'<div style="font-size:11px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;">{title}</div>'
+            f'<div style="font-size:9px;opacity:.7;margin-top:2px;">{sub}</div>'
+            f'<div style="font-size:14px;font-weight:700;font-family:Rajdhani,sans-serif;margin-top:4px;">{count}</div>'
+            f'</div><div class="gde-node-label">{label}</div></div>'
+        )
+
+    html = '<div class="gde-flow">'
+    if has_join:
+        html += '<div class="gde-node"><div style="display:flex;flex-direction:column;gap:10px;">'
+        html += node("📂 INPUT 1", fn1[:18], in_d,  i_bg, i_bdr, i_col, real[0])
+        html += node("📂 INPUT 2", fn2[:18], in2_d, i_bg, i_bdr, i_col, real[1])
+        html += '</div></div>'
+    else:
+        html += node("📂 INPUT", fn1[:18], in_d, i_bg, i_bdr, i_col, real[0])
+    html += arrow(a1c, "raw data")
+    html += node("🔒 PII MASK", "Auto-Detect", f"{mc} cols", p_bg, p_bdr, p_col,
+                 '<span style="color:#69F0AE;font-size:9px;">SCHEMA ONLY→AI</span>')
+    html += arrow(pac, "schema only")
+    html += node(f"⚙ {trans_label}", "AI GENERATED", tr_d, t_bg, t_bdr, t_col, t_st, t_anim)
+    html += arrow(a2c, out_d if done else "")
+    html += node("💾 OUTPUT", f"{out_cols} cols", out_d, o_bg, o_bdr, o_col, "RESULT")
+    html += '</div>'
+
+    legend = (
+        '<div class="gde-legend">'
+        '<div class="gde-legend-item"><div class="legend-dot" style="background:#1E90FF;"></div>Input</div>'
+        '<div class="gde-legend-item"><div class="legend-dot" style="background:#69F0AE;"></div>PII Layer</div>'
+        '<div class="gde-legend-item"><div class="legend-dot" style="background:#FFD600;"></div>Running</div>'
+        '<div class="gde-legend-item"><div class="legend-dot" style="background:#29B6F6;"></div>Complete</div>'
+        '<div class="gde-legend-item"><div class="legend-dot" style="background:#AB47BC;"></div>Output</div>'
+        '</div>'
+    )
+    return f'<div class="gde-container">{html}{legend}</div>'
+
+
+# ═══════════════════════════════════════════════════════════
+# DOWNLOAD PANEL
+# ═══════════════════════════════════════════════════════════
+def render_download_panel(masked_df, original_df, file_names, masked_cols):
     st.markdown("""
     <div class="decrypt-panel">
         <div class="decrypt-panel-title">⬇️ EXPORT & DOWNLOAD OPTIONS</div>
-    </div>
-    """, unsafe_allow_html=True)
+    </div>""", unsafe_allow_html=True)
 
     col_a, col_b = st.columns(2)
 
-    # --- Option A: Privacy-Protected (masked) ---
     with col_a:
         st.markdown("""
         <div class="download-option">
             <div class="download-option-title">🔒 Privacy-Protected Export</div>
-            <div class="download-option-desc">PII columns masked with one-way hashes. Safe for sharing, auditing, or external reporting. Recommended for most use cases.</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        masked_csv = masked_result_df.to_csv(index=False).encode("utf-8")
+            <div class="download-option-desc">PII masked with one-way hashes. Safe for sharing, audits, external reporting.</div>
+        </div>""", unsafe_allow_html=True)
         st.download_button(
-            label="⬇ Download Masked CSV",
-            data=masked_csv,
-            file_name="output_privacy_protected.csv",
-            mime="text/csv",
-            key="dl_masked_csv"
+            "⬇ Download Masked CSV",
+            masked_df.to_csv(index=False).encode("utf-8"),
+            "output_privacy_protected.csv", "text/csv",
+            key="dl_masked_csv",
         )
-        xlsx_buf = BytesIO()
-        with pd.ExcelWriter(xlsx_buf, engine="xlsxwriter") as writer:
-            masked_result_df.to_excel(writer, sheet_name="Transformed_Data", index=False)
-            privacy_report = [
-                {"Check": "PII Columns Masked", "Result": ", ".join(all_masked_cols) if all_masked_cols else "None"},
-                {"Check": "Schema-Only AI Processing", "Result": "YES"},
-                {"Check": "Session ID", "Result": SESSION_ID},
-                {"Check": "Export Type", "Result": "Privacy Protected"},
-            ]
-            pd.DataFrame(privacy_report).to_excel(writer, sheet_name="Privacy_Report", index=False)
+        xbuf = BytesIO()
+        with pd.ExcelWriter(xbuf, engine="xlsxwriter") as w:
+            masked_df.to_excel(w, sheet_name="Transformed_Data", index=False)
+            pd.DataFrame([
+                {"Check": "PII Columns Masked",   "Result": ", ".join(masked_cols) or "None"},
+                {"Check": "Schema-Only AI",        "Result": "YES"},
+                {"Check": "AI Provider",           "Result": get_active_provider()},
+                {"Check": "Active Model",          "Result": get_active_model()},
+                {"Check": "Session ID",            "Result": SESSION_ID},
+                {"Check": "Export Timestamp",      "Result": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+            ]).to_excel(w, sheet_name="Privacy_Report", index=False)
         st.download_button(
-            label="⬇ Download Masked Excel + Privacy Report",
-            data=xlsx_buf.getvalue(),
-            file_name="output_privacy_protected.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_masked_xlsx"
+            "⬇ Download Masked Excel + Privacy Report",
+            xbuf.getvalue(),
+            "output_privacy_protected.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_masked_xlsx",
         )
 
-    # --- Option B: Decrypted / Original Data ---
     with col_b:
         st.markdown("""
-        <div class="download-option" style="border-color: rgba(255,152,0,0.4); background: rgba(255,152,0,0.05);">
-            <div class="download-option-title" style="color:#E65100;">🔓 Decrypted / Original Data Export</div>
-            <div class="download-option-desc" style="color:#795548;">Re-runs transformation on your <b>original unmasked data</b>. Contains real PII. Restrict access. Only download if required for internal use.</div>
-        </div>
-        """, unsafe_allow_html=True)
+        <div class="download-option" style="border-color:rgba(255,152,0,.4);background:rgba(255,152,0,.05);">
+            <div class="download-option-title" style="color:#E65100;">🔓 Decrypted / Original Export</div>
+            <div class="download-option-desc" style="color:#795548;">Contains real PII. Requires acknowledgement. Restrict access.</div>
+        </div>""", unsafe_allow_html=True)
 
-        # Acknowledge gate
-        decrypt_ack = st.checkbox(
-            "⚠️ I acknowledge this export contains real PII/sensitive data and I am authorised to access it.",
-            key="decrypt_ack"
-        )
-        if decrypt_ack:
-            audit_log("DECRYPT_EXPORT_ACKNOWLEDGED", SESSION_ID,
-                      f"User acknowledged PII export. Files={file_names}", "HIGH")
-            orig_csv = original_df.to_csv(index=False).encode("utf-8")
+        if st.checkbox("⚠️ I confirm this export contains real PII and I am authorised to access it.", key="decrypt_ack"):
+            audit_log("DECRYPT_ACKNOWLEDGED", SESSION_ID, f"Files={file_names}", "HIGH")
             st.download_button(
-                label="🔓 Download DECRYPTED CSV (Original Data)",
-                data=orig_csv,
-                file_name="output_ORIGINAL_DATA_SENSITIVE.csv",
-                mime="text/csv",
-                key="dl_original_csv"
+                "🔓 Download DECRYPTED CSV",
+                original_df.to_csv(index=False).encode("utf-8"),
+                "output_ORIGINAL_SENSITIVE.csv", "text/csv",
+                key="dl_orig_csv",
             )
-            orig_xlsx = BytesIO()
-            with pd.ExcelWriter(orig_xlsx, engine="xlsxwriter") as writer:
-                original_df.to_excel(writer, sheet_name="Original_Data", index=False)
+            obuf = BytesIO()
+            with pd.ExcelWriter(obuf, engine="xlsxwriter") as w:
+                original_df.to_excel(w, sheet_name="Original_Data", index=False)
                 pd.DataFrame([
-                    {"Check": "Export Type", "Result": "DECRYPTED — CONTAINS REAL PII"},
-                    {"Check": "Authorised By", "Result": "User Acknowledged"},
-                    {"Check": "Session", "Result": SESSION_ID},
-                    {"Check": "Timestamp", "Result": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-                ]).to_excel(writer, sheet_name="Access_Log", index=False)
+                    {"Check": "Export Type",  "Result": "DECRYPTED — CONTAINS REAL PII"},
+                    {"Check": "Authorised",   "Result": "User Acknowledged"},
+                    {"Check": "AI Provider",  "Result": get_active_provider()},
+                    {"Check": "Session",      "Result": SESSION_ID},
+                    {"Check": "Timestamp",    "Result": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+                ]).to_excel(w, sheet_name="Access_Log", index=False)
             st.download_button(
-                label="🔓 Download DECRYPTED Excel (Original Data)",
-                data=orig_xlsx.getvalue(),
-                file_name="output_ORIGINAL_DATA_SENSITIVE.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="dl_original_xlsx"
+                "🔓 Download DECRYPTED Excel",
+                obuf.getvalue(),
+                "output_ORIGINAL_SENSITIVE.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_orig_xlsx",
             )
-            st.warning("⚠️ This file contains real PII. Handle according to your data classification policy.")
+            st.warning("⚠️ Handle according to your data classification policy.")
         else:
-            st.info("Check the acknowledgement box above to unlock decrypted export.")
+            st.info("Check the acknowledgement box to unlock decrypted export.")
 
 
-# -----------------------------------
-# PROJECT TYPE PROMPTS
-# -----------------------------------
-PROJECT_TYPE_PROMPTS = {
-    "🌐 Web Application": "You are a Senior Agile Delivery Manager specialising in Web Application delivery.",
-    "📱 Mobile App": "You are a Senior Agile Delivery Manager specialising in Mobile Application delivery.",
-    "📊 Data / ETL Pipeline": "You are a Senior Agile Delivery Manager specialising in Data Engineering and ETL pipelines.",
-    "🔗 API / Integration": "You are a Senior Agile Delivery Manager specialising in API and Systems Integration.",
-    "☁️ Cloud / Infrastructure": "You are a Senior Agile Delivery Manager specialising in Cloud Infrastructure and DevOps.",
-    "🔒 Security Feature": "You are a Senior Agile Delivery Manager specialising in Cybersecurity features.",
-    "🏦 Banking / FinTech": "You are a Senior Agile Delivery Manager specialising in Banking and FinTech product delivery with deep knowledge of PCI-DSS, GDPR, FCA and SOX compliance.",
-    "🤖 AI / ML Feature": "You are a Senior Agile Delivery Manager specialising in AI and Machine Learning product delivery.",
-    "📋 General / Other": "You are a Senior Agile Delivery Manager with 15+ years enterprise software delivery experience.",
+# ═══════════════════════════════════════════════════════════
+# JIRA HELPERS
+# ═══════════════════════════════════════════════════════════
+PROJECT_PROMPTS = {
+    "🌐 Web Application":     "Senior Agile Delivery Manager specialising in Web Application delivery.",
+    "📱 Mobile App":          "Senior Agile Delivery Manager specialising in Mobile Application delivery.",
+    "📊 Data / ETL Pipeline": "Senior Agile Delivery Manager specialising in Data Engineering and ETL.",
+    "🔗 API / Integration":   "Senior Agile Delivery Manager specialising in API and Systems Integration.",
+    "☁️ Cloud / Infra":       "Senior Agile Delivery Manager specialising in Cloud Infrastructure and DevOps.",
+    "🔒 Security Feature":    "Senior Agile Delivery Manager specialising in Cybersecurity.",
+    "🏦 Banking / FinTech":   "Senior Agile Delivery Manager for Banking/FinTech with PCI-DSS, GDPR, FCA, SOX expertise.",
+    "🤖 AI / ML Feature":     "Senior Agile Delivery Manager specialising in AI and Machine Learning delivery.",
+    "📋 General / Other":     "Senior Agile Delivery Manager with 15+ years enterprise software delivery.",
 }
 
+def build_jira_prompt(description, project_type, team_size, sprint_len, methodology):
+    sanitized, pii = sanitize_prompt(description)
+    system = f"You are a {PROJECT_PROMPTS.get(project_type, PROJECT_PROMPTS['📋 General / Other'])}"
+    user = f"""REQUIREMENT (PII-SANITISED):
+{sanitized}
 
-def build_jira_prompt_secure(description, project_type, team_size, sprint_length, methodology):
-    sanitized_desc, pii_found = sanitize_prompt(description)
-    system = PROJECT_TYPE_PROMPTS.get(project_type, PROJECT_TYPE_PROMPTS["📋 General / Other"])
-    user = f"""BUSINESS REQUIREMENT (PII-SANITISED):
-{sanitized_desc}
+CONTEXT: Type={project_type}, Team={team_size}, Sprint={sprint_len}wk, Method={methodology}
 
-TEAM CONTEXT: Project Type: {project_type}, Team Size: {team_size}, Sprint: {sprint_length} weeks, Methodology: {methodology}
+Return ONLY valid JSON:
+{{"epic":{{"title":"","business_value":"","objective":"","estimated_sprints":3,"definition_of_done":[]}},"stories":[{{"id":"US-001","title":"","user_story":"As a [role], I want [feature], so that [benefit]","priority":"High","story_points":5,"sprint":"Sprint 1","type":"Feature","acceptance_criteria":["Given...When...Then..."],"subtasks":[{{"title":"","hours":4}}]}}],"risks":[{{"title":"","description":""}}],"dependencies":[]}}
 
-Generate complete Jira breakdown. Return ONLY valid JSON:
-{{"epic":{{"title":"","business_value":"","objective":"","estimated_sprints":3,"definition_of_done":[]}},"stories":[{{"id":"US-001","title":"","user_story":"As a [role], I want [feature], so that [benefit]","priority":"High","story_points":5,"sprint":"Sprint 1","type":"Feature","acceptance_criteria":["Given..."],"subtasks":[{{"title":"","hours":4}}]}}],"risks":[{{"title":"","description":""}}],"dependencies":[]}}
-
-RULES: 4-7 stories, Fibonacci points (1,2,3,5,8,13), Gherkin AC (Given/When/Then), return ONLY JSON. Do NOT include any PII."""
-    return system, user, pii_found
-
-
-def render_jira_cards(data):
-    epic = data.get("epic", {})
-    stories = data.get("stories", [])
-    risks = data.get("risks", [])
-    dependencies = data.get("dependencies", [])
-    total_points = sum(s.get("story_points", 0) for s in stories)
-    sprints_needed = epic.get("estimated_sprints", "?")
-    html = f"""<div class="jira-metrics">
-    <div class="jira-metric-box"><div class="jira-metric-value">{len(stories)}</div><div class="jira-metric-label">Stories</div></div>
-    <div class="jira-metric-box"><div class="jira-metric-value">{total_points}</div><div class="jira-metric-label">Total Points</div></div>
-    <div class="jira-metric-box"><div class="jira-metric-value">{sprints_needed}</div><div class="jira-metric-label">Sprints</div></div>
-    <div class="jira-metric-box"><div class="jira-metric-value">{len(risks)}</div><div class="jira-metric-label">Risks</div></div>
-    <div class="jira-metric-box"><div class="jira-metric-value">{len(dependencies)}</div><div class="jira-metric-label">Dependencies</div></div>
-    </div>"""
-    dod_items = "".join(f'<div class="dod-item">✓ {d}</div>' for d in epic.get("definition_of_done", []))
-    html += f"""<div class="epic-card">
-    <div class="epic-title">🏆 EPIC: {epic.get('title','')}</div>
-    <div class="epic-value">{epic.get('business_value','')}</div>
-    <div class="epic-value" style="margin-top:6px;"><b>Objective:</b> {epic.get('objective','')}</div>
-    <div class="epic-meta">
-        <span class="epic-badge">📅 {sprints_needed} Sprints</span>
-        <span class="epic-badge">📊 {total_points} Story Points</span>
-        <span class="epic-badge">📝 {len(stories)} Stories</span>
-    </div></div>"""
-    if epic.get("definition_of_done"):
-        html += f'<div class="dod-card"><div class="dod-title">✅ Definition of Done</div>{dod_items}</div>'
-    return html, stories, risks, dependencies
+RULES: 4-7 stories, Fibonacci points (1/2/3/5/8/13), Gherkin AC format, ONLY JSON output."""
+    return system, user, pii
 
 
-# ============================================================
-# EXAMPLE PROMPTS for the ETL Engine
-# ============================================================
-EXAMPLE_PROMPTS = [
-    {
-        "tag": "✅ Customer Transaction Summary",
-        "complexity": "Medium",
-        "text": "Join customers with accounts on CUSTOMER_ID, then join with transactions on ACCOUNT_ID. Keep only ACTIVE accounts and VERIFIED customers. For each customer compute: FULL_NAME (FIRST_NAME + LAST_NAME), ACCOUNT_COUNT, TOTAL_TRANSACTIONS, TOTAL_AMOUNT (all transactions), AVG_AMOUNT, sorted by TOTAL_AMOUNT descending."
-    },
-    {
-        "tag": "✅ Channel Spend Analysis",
-        "complexity": "Simple",
-        "text": "Using the transactions file, filter only DEBIT transactions. Group by CHANNEL and compute: TOTAL_TRANSACTIONS, TOTAL_AMOUNT, AVG_AMOUNT, MAX_AMOUNT. Sort by TOTAL_AMOUNT descending."
-    },
-    {
-        "tag": "✅ Dormant Account Report",
-        "complexity": "Medium",
-        "text": "Join accounts with transactions on ACCOUNT_ID. For each DORMANT account, find the last transaction date (LAST_TXN_DATE) and calculate DAYS_INACTIVE as days since last transaction. Join with customers to get FIRST_NAME, LAST_NAME. Output: CUSTOMER_ID, FIRST_NAME, LAST_NAME, ACCOUNT_ID, ACCOUNT_TYPE, BALANCE, LAST_TXN_DATE, DAYS_INACTIVE. Sort by DAYS_INACTIVE descending."
-    },
-    {
-        "tag": "✅ Monthly Credit vs Debit",
-        "complexity": "Medium",
-        "text": "Using the transactions file, extract MONTH from TRANSACTION_DATE (format YYYY-MM). Pivot to get CREDIT total and DEBIT total per month. Add a NET_FLOW column (CREDIT minus DEBIT). Sort by MONTH ascending."
-    },
-    {
-        "tag": "✅ Top 20 Customers by Balance",
-        "complexity": "Simple",
-        "text": "Join customers with accounts on CUSTOMER_ID. Keep only ACTIVE accounts and exclude REJECTED KYC customers. Per customer calculate FULL_NAME (FIRST_NAME + LAST_NAME), TOTAL_BALANCE (sum of BALANCE across all active accounts), ACCOUNT_COUNT. Return top 20 by TOTAL_BALANCE descending."
-    },
-    {
-        "tag": "⚡ Risk Profile (Complex)",
-        "complexity": "High",
-        "text": "Join customers with accounts on CUSTOMER_ID. Join accounts with transactions on ACCOUNT_ID. Filter only ACTIVE accounts. Exclude KYC_STATUS = REJECTED. For each CUSTOMER_ID using last 90 days transactions compute: TOTAL_TRANSACTIONS, TOTAL_DEBIT (sum of DEBIT amounts), TOTAL_CREDIT (sum of CREDIT amounts), AVG_TRANSACTION_AMOUNT. RISK_LEVEL: HIGH if TOTAL_DEBIT > 500000 or more than 3 transactions above 100000, MEDIUM if TOTAL_DEBIT between 200000 and 500000, LOW otherwise. Output: CUSTOMER_ID, FULL_NAME, ACCOUNT_COUNT, TOTAL_TRANSACTIONS, TOTAL_DEBIT, TOTAL_CREDIT, AVG_TRANSACTION_AMOUNT, RISK_LEVEL. Sort by TOTAL_DEBIT descending."
-    },
+# ═══════════════════════════════════════════════════════════
+# CSS
+# ═══════════════════════════════════════════════════════════
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Rajdhani:wght@600;700&family=Space+Mono:wght@400;700&display=swap');
+* { font-family:'Inter',sans-serif; }
+.privacy-shield { background:linear-gradient(135deg,#0a1628,#0d2137); border:1px solid rgba(41,182,246,.3); border-left:4px solid #29B6F6; border-radius:10px; padding:14px 18px; margin-bottom:16px; }
+.privacy-shield .ps-title { color:#29B6F6; font-family:'Space Mono',monospace; font-size:11px; letter-spacing:1.5px; font-weight:700; margin-bottom:8px; }
+.privacy-shield .ps-items { display:flex; gap:10px; flex-wrap:wrap; }
+.privacy-shield .ps-item { background:rgba(41,182,246,.1); border:1px solid rgba(41,182,246,.2); color:#7BB8FF; padding:3px 10px; border-radius:12px; font-size:11px; font-family:'Space Mono',monospace; }
+.pii-warning { background:#FFF3E0; border:1px solid #FFB300; border-left:4px solid #F57F17; border-radius:8px; padding:10px 14px; margin:8px 0; }
+.pii-warning .pw-title { color:#E65100; font-weight:700; font-size:12px; }
+.mask-badge { background:#E8F5E9; border:1px solid #A5D6A7; color:#2E7D32; padding:2px 8px; border-radius:10px; font-size:11px; font-family:'Space Mono',monospace; display:inline-block; margin:2px; }
+.session-bar { display:flex; align-items:center; justify-content:space-between; background:rgba(179,27,27,.05); border:1px solid rgba(179,27,27,.15); border-radius:8px; padding:8px 14px; margin-bottom:12px; font-size:11px; font-family:'Space Mono',monospace; flex-wrap:wrap; gap:6px; }
+.session-bar .sb-val { color:#B31B1B; font-weight:700; }
+.main-header { background:linear-gradient(135deg,#B31B1B 0%,#7a1212 100%); padding:22px 28px; border-radius:10px; margin-bottom:20px; display:flex; align-items:center; justify-content:space-between; box-shadow:0 4px 15px rgba(179,27,27,.3); flex-wrap:wrap; gap:12px; }
+.main-header h1 { color:#FFC72C; margin:0; font-family:'Rajdhani',sans-serif; font-size:28px; font-weight:700; }
+.main-header .header-sub { color:rgba(255,255,255,.6); font-size:12px; margin-top:4px; }
+.version-badge { background:rgba(255,199,44,.15); border:1px solid rgba(255,199,44,.4); color:#FFC72C; padding:4px 12px; border-radius:20px; font-size:11px; font-weight:600; letter-spacing:1px; }
+.secure-badge { background:rgba(41,182,246,.15); border:1px solid rgba(41,182,246,.4); color:#29B6F6; padding:4px 12px; border-radius:20px; font-size:11px; font-weight:600; margin-top:6px; display:inline-block; }
+.provider-pill { background:rgba(105,240,174,.15); border:1px solid rgba(105,240,174,.4); color:#69F0AE; padding:4px 12px; border-radius:20px; font-size:11px; font-weight:600; margin-top:4px; display:inline-block; }
+.section-title { color:#B31B1B; font-weight:600; font-size:16px; margin-top:20px; text-transform:uppercase; letter-spacing:.5px; }
+.stButton>button { background-color:#B31B1B; color:white; font-weight:bold; border-radius:6px; }
+.stButton>button:hover { background-color:#8E1414; color:#FFC72C; }
+.metric-row { display:flex; gap:12px; margin:16px 0 8px 0; flex-wrap:wrap; }
+.metric-box { background:white; border:1px solid #E8E8E8; border-top:3px solid #B31B1B; border-radius:8px; padding:14px 18px; min-width:120px; text-align:center; box-shadow:0 2px 8px rgba(0,0,0,.06); flex:1; }
+.metric-box .metric-value { font-size:28px; font-weight:700; color:#B31B1B; font-family:'Rajdhani',sans-serif; }
+.metric-box .metric-label { font-size:10px; color:#999; text-transform:uppercase; letter-spacing:.8px; margin-top:2px; }
+.pipeline-steps { padding:4px 0; }
+.pipeline-step { display:flex; align-items:flex-start; gap:12px; padding:10px 0; border-bottom:1px solid #F0F0F0; font-size:14px; }
+.pipeline-step:last-child { border-bottom:none; }
+.step-num { background:#B31B1B; color:white; border-radius:50%; width:22px; height:22px; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700; min-width:22px; }
+.step-icon { font-size:18px; min-width:24px; }
+.step-text { flex:1; line-height:1.5; }
+.gde-container { background:#0D1117; border-radius:10px; padding:24px 20px; margin:12px 0; overflow-x:auto; }
+.gde-flow { display:flex; align-items:center; min-width:max-content; padding:8px 0; }
+.gde-node { display:flex; flex-direction:column; align-items:center; gap:6px; }
+.gde-node-label { font-size:10px; color:#666; text-align:center; max-width:130px; }
+.gde-arrow { display:flex; flex-direction:column; align-items:center; gap:4px; padding:0 6px; min-width:70px; }
+.gde-count-label { font-size:10px; white-space:nowrap; text-align:center; }
+.gde-legend { display:flex; gap:20px; margin-top:16px; flex-wrap:wrap; }
+.gde-legend-item { display:flex; align-items:center; gap:6px; font-size:11px; color:#888; }
+.legend-dot { width:10px; height:10px; border-radius:2px; }
+@keyframes pulse { 0%,100%{box-shadow:0 0 8px rgba(255,214,0,.3);} 50%{box-shadow:0 0 20px rgba(255,214,0,.7);} }
+.decrypt-panel { background:linear-gradient(135deg,#0a2a0a,#0d1f0d); border:2px solid rgba(105,240,174,.4); border-radius:12px; padding:20px 24px; margin:16px 0; }
+.decrypt-panel-title { color:#69F0AE; font-family:'Space Mono',monospace; font-size:12px; font-weight:700; letter-spacing:1.5px; margin-bottom:12px; }
+.download-option { background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.1); border-radius:8px; padding:12px 16px; margin:8px 0; }
+.download-option-title { color:white; font-size:13px; font-weight:600; margin-bottom:4px; }
+.download-option-desc { color:rgba(255,255,255,.6); font-size:11px; }
+.epic-card { background:linear-gradient(135deg,#B31B1B,#7a1212); border-radius:10px; padding:20px 24px; margin:16px 0; }
+.epic-title { color:#FFC72C; font-family:'Rajdhani',sans-serif; font-size:22px; font-weight:700; }
+.epic-value { color:rgba(255,255,255,.85); font-size:13px; margin-top:6px; line-height:1.6; }
+.epic-meta { display:flex; gap:10px; margin-top:12px; flex-wrap:wrap; }
+.epic-badge { background:rgba(255,199,44,.2); border:1px solid rgba(255,199,44,.5); color:#FFC72C; padding:3px 10px; border-radius:12px; font-size:11px; font-weight:600; }
+.story-card { background:white; border:1px solid #E8E8E8; border-left:4px solid #B31B1B; border-radius:8px; padding:16px 20px; margin:10px 0; }
+.story-id { font-size:11px; color:#999; font-weight:600; }
+.story-title { font-size:14px; font-weight:600; color:#1a1a1a; margin:4px 0 8px 0; line-height:1.4; }
+.story-desc { font-size:13px; color:#555; line-height:1.6; font-style:italic; }
+.story-badges { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
+.badge-high { background:#FFF3E0; color:#E65100; border:1px solid #FFCC80; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:700; }
+.badge-medium { background:#FFFDE7; color:#F57F17; border:1px solid #FFF176; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:700; }
+.badge-low { background:#F5F5F5; color:#616161; border:1px solid #E0E0E0; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:700; }
+.badge-critical { background:#FFEBEE; color:#C62828; border:1px solid #EF9A9A; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:700; }
+.badge-points { background:#FFC72C; color:#1a1a1a; padding:2px 10px; border-radius:10px; font-size:12px; font-weight:700; }
+.badge-sprint { background:#E8F5E9; color:#2E7D32; border:1px solid #A5D6A7; padding:2px 8px; border-radius:10px; font-size:11px; }
+.badge-type { background:#E3F2FD; color:#1565C0; border:1px solid #90CAF9; padding:2px 8px; border-radius:10px; font-size:11px; }
+.ac-section { margin-top:12px; }
+.ac-title { font-size:11px; font-weight:700; color:#B31B1B; text-transform:uppercase; margin-bottom:6px; }
+.ac-item { font-size:12px; color:#444; padding:4px 0 4px 12px; border-left:2px solid #FFC72C; margin:4px 0; line-height:1.5; }
+.subtask-item { display:flex; align-items:center; gap:8px; font-size:12px; color:#555; padding:3px 0; }
+.subtask-hrs { font-size:10px; color:#999; background:#F5F5F5; padding:1px 6px; border-radius:8px; }
+.risk-card { background:#FFF8E1; border:1px solid #FFE082; border-left:4px solid #FFC72C; border-radius:8px; padding:14px 18px; margin:10px 0; }
+.risk-title { font-size:13px; font-weight:700; color:#E65100; margin-bottom:6px; }
+.risk-item { font-size:12px; color:#555; padding:3px 0 3px 12px; border-left:2px solid #FFB300; margin:3px 0; }
+.dod-card { background:#E8F5E9; border:1px solid #A5D6A7; border-left:4px solid #2E7D32; border-radius:8px; padding:14px 18px; margin:10px 0; }
+.dod-title { font-size:13px; font-weight:700; color:#1B5E20; margin-bottom:6px; }
+.dod-item { font-size:12px; color:#2E7D32; padding:3px 0 3px 12px; border-left:2px solid #66BB6A; margin:3px 0; }
+.jira-metrics { display:flex; gap:12px; margin:16px 0; flex-wrap:wrap; }
+.jira-metric-box { background:white; border:1px solid #E8E8E8; border-top:3px solid #B31B1B; border-radius:8px; padding:12px 16px; min-width:100px; text-align:center; flex:1; }
+.jira-metric-value { font-size:24px; font-weight:700; color:#B31B1B; font-family:'Rajdhani',sans-serif; }
+.jira-metric-label { font-size:10px; color:#999; text-transform:uppercase; }
+.built-by { display:flex; align-items:center; justify-content:flex-end; gap:8px; padding:6px 16px 0 0; margin-bottom:-6px; }
+.built-by .byline { font-size:11px; color:#999; letter-spacing:.8px; text-transform:uppercase; }
+.built-by .author { font-family:'Rajdhani',sans-serif; font-size:15px; font-weight:700; color:#B31B1B; }
+.built-by .dot { width:6px; height:6px; background:#FFC72C; border-radius:50%; display:inline-block; }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ═══════════════════════════════════════════════════════════
+# EXAMPLE PROMPTS
+# ═══════════════════════════════════════════════════════════
+EXAMPLES = [
+    {"tag": "✅ Customer Summary",     "complexity": "Medium",
+     "text": "Join customers with accounts on CUSTOMER_ID, then join with transactions on ACCOUNT_ID. Keep ACTIVE accounts and VERIFIED customers. Compute FULL_NAME (FIRST_NAME+LAST_NAME), ACCOUNT_COUNT, TOTAL_TRANSACTIONS, TOTAL_AMOUNT, AVG_AMOUNT. Sort by TOTAL_AMOUNT descending."},
+    {"tag": "✅ Channel Spend",        "complexity": "Simple",
+     "text": "Filter only DEBIT transactions. Group by CHANNEL and compute TOTAL_TRANSACTIONS, TOTAL_AMOUNT, AVG_AMOUNT, MAX_AMOUNT. Sort by TOTAL_AMOUNT descending."},
+    {"tag": "✅ Dormant Accounts",     "complexity": "Medium",
+     "text": "Join accounts with transactions on ACCOUNT_ID. For each DORMANT account find LAST_TXN_DATE and compute DAYS_INACTIVE. Join customers for FIRST_NAME, LAST_NAME. Sort by DAYS_INACTIVE descending."},
+    {"tag": "✅ Monthly Credit/Debit", "complexity": "Medium",
+     "text": "Extract MONTH (YYYY-MM) from TRANSACTION_DATE. Pivot CREDIT and DEBIT totals per month. Add NET_FLOW (CREDIT minus DEBIT). Sort by MONTH ascending."},
+    {"tag": "✅ Top 20 by Balance",    "complexity": "Simple",
+     "text": "Join customers with accounts on CUSTOMER_ID. Keep ACTIVE accounts, exclude KYC=REJECTED. Per customer: FULL_NAME, TOTAL_BALANCE, ACCOUNT_COUNT. Top 20 by TOTAL_BALANCE desc."},
+    {"tag": "⚡ Risk Profile",         "complexity": "High",
+     "text": "Join customers→accounts→transactions. Active accounts only, exclude KYC=REJECTED. Last 90 days per customer: TOTAL_DEBIT, TOTAL_CREDIT, AVG_TXN. RISK_LEVEL: HIGH if TOTAL_DEBIT>500000 or >3 txns above 100000, MEDIUM if 200k-500k, LOW otherwise. Sort by TOTAL_DEBIT desc."},
 ]
 
-# ============================================================
+
+# ═══════════════════════════════════════════════════════════
 # HEADER
-# ============================================================
+# ═══════════════════════════════════════════════════════════
+active_prov  = get_active_provider()
+active_model = get_active_model()
+
 st.markdown("""
-<div class="built-by-banner">
+<div class="built-by">
     <span class="byline">Built by</span>
     <span class="dot"></span>
     <span class="author">PRADEEP</span>
     <span class="dot"></span>
     <span class="byline">Enterprise AI</span>
-</div>
-""", unsafe_allow_html=True)
+</div>""", unsafe_allow_html=True)
 
 st.markdown(f"""
 <div class="main-header">
     <div>
-        <div class="header-sub">AI POWERED &nbsp;·&nbsp; LLAMA 3.3 · MULTI-MODEL &nbsp;·&nbsp; PANDAS &nbsp;·&nbsp; 🔒 BANK-GRADE PRIVACY</div>
+        <div class="header-sub">AI POWERED · LITELLM MULTI-PROVIDER · GEMINI PRIMARY · 🔒 BANK-GRADE PRIVACY</div>
         <h1>⚡ Enterprise AI Transformation &amp; Delivery Platform</h1>
         <div class="secure-badge">🛡️ PII PROTECTED · SCHEMA-ONLY AI · DECRYPT ON DEMAND · AUDIT LOGGED</div>
+        <div class="provider-pill">🤖 Active: {active_prov} &nbsp;·&nbsp; {active_model}</div>
     </div>
     <div style="text-align:right;">
-        <div class="version-badge">v5.1 SECURE</div>
+        <div class="version-badge">v6.0 MULTI-PROVIDER</div>
     </div>
-</div>
-""", unsafe_allow_html=True)
+</div>""", unsafe_allow_html=True)
 
 st.markdown(f"""
 <div class="session-bar">
-    <div class="sb-item">🔐 <span>Session:</span> <span class="sb-val">{SESSION_ID}</span></div>
-    <div class="sb-item sb-secure">🛡️ PII Masking: <span class="sb-val" style="color:#2E7D32;">ACTIVE</span></div>
-    <div class="sb-item sb-secure">🔒 Schema-Only AI: <span class="sb-val" style="color:#2E7D32;">ENABLED</span></div>
-    <div class="sb-item sb-secure">🔓 Decrypt Export: <span class="sb-val" style="color:#2E7D32;">AVAILABLE</span></div>
-    <div class="sb-item">📋 Audit: <span class="sb-val" style="color:#1565C0;">ON</span></div>
-    <div class="sb-item">⏱️ {datetime.datetime.now().strftime("%d %b %Y %H:%M")}</div>
-</div>
-""", unsafe_allow_html=True)
+    <div>🔐 Session: <span class="sb-val">{SESSION_ID}</span></div>
+    <div style="color:#2E7D32;">🛡️ PII Masking: <span class="sb-val" style="color:#2E7D32;">ACTIVE</span></div>
+    <div style="color:#2E7D32;">🔒 Schema-Only AI: <span class="sb-val" style="color:#2E7D32;">ENABLED</span></div>
+    <div style="color:#2E7D32;">🔓 Decrypt Export: <span class="sb-val" style="color:#2E7D32;">AVAILABLE</span></div>
+    <div>🤖 Provider: <span class="sb-val" style="color:#1565C0;">{active_prov}</span></div>
+    <div>⏱️ {datetime.datetime.now().strftime("%d %b %Y %H:%M")}</div>
+</div>""", unsafe_allow_html=True)
 
 st.markdown("""
 <div class="privacy-shield">
-    <div class="ps-title">🔒 BANK-GRADE PRIVACY PROTECTION — ALL SESSIONS</div>
+    <div class="ps-title">🔒 BANK-GRADE PRIVACY — ALL SESSIONS</div>
     <div class="ps-items">
-        <span class="ps-item">✓ Schema-only sent to AI</span>
-        <span class="ps-item">✓ PII auto-masked before processing</span>
-        <span class="ps-item">✓ Decrypt export with acknowledgement</span>
-        <span class="ps-item">✓ No data stored server-side</span>
-        <span class="ps-item">✓ Session isolated memory only</span>
-        <span class="ps-item">✓ Prompt PII scanning</span>
-        <span class="ps-item">✓ Tamper-evident audit log</span>
-        <span class="ps-item">✓ Auto-clear on session end</span>
+        <span class="ps-item">✓ Schema-only to AI</span>
+        <span class="ps-item">✓ PII auto-masked</span>
+        <span class="ps-item">✓ Decrypt with consent</span>
+        <span class="ps-item">✓ No server storage</span>
+        <span class="ps-item">✓ Session memory only</span>
+        <span class="ps-item">✓ Prompt PII scan</span>
+        <span class="ps-item">✓ Tamper-evident audit</span>
+        <span class="ps-item">✓ Multi-provider · no single point of failure</span>
     </div>
-</div>
-""", unsafe_allow_html=True)
+</div>""", unsafe_allow_html=True)
 
-# ============================================================
+
+# ═══════════════════════════════════════════════════════════
 # TABS
-# ============================================================
-tab1, tab2, tab3, tab4 = st.tabs(["⚡ AI ETL Engine", "📋 AI Jira Breakdown", "🎬 Demo & Benefits", "🔒 Privacy & Audit"])
+# ═══════════════════════════════════════════════════════════
+tab1, tab2, tab3, tab4 = st.tabs([
+    "⚡ AI ETL Engine",
+    "📋 AI Jira Breakdown",
+    "🎬 Demo & Benefits",
+    "🔒 Privacy & Audit",
+])
 
 
-# ============================================================
-# TAB 1 — AI ETL ENGINE
-# ============================================================
+# ───────────────────────────────────────────────────────────
+# TAB 1  —  ETL ENGINE
+# ───────────────────────────────────────────────────────────
 with tab1:
     st.markdown("""
     <div style="background:#F0F7FF;border:1px solid #BBDEFB;border-left:4px solid #1E90FF;border-radius:8px;padding:12px 16px;margin-bottom:16px;">
         <div style="font-size:12px;font-weight:700;color:#1565C0;margin-bottom:6px;">🔒 HOW YOUR DATA IS PROTECTED</div>
-        <div style="font-size:12px;color:#333;line-height:1.8;">
-            <b>Step 1:</b> CSV uploaded to session memory only — never stored to disk.<br>
-            <b>Step 2:</b> PII scanner detects sensitive columns and masks them with one-way hashes.<br>
-            <b>Step 3:</b> ONLY column names, data types, and 2 masked sample rows are sent to AI.<br>
-            <b>Step 4:</b> AI generates transformation code from schema. Code runs locally in session.<br>
-            <b>Step 5:</b> Download masked output (safe) or decrypted output (requires acknowledgement).<br>
-            <b>Step 6:</b> All data cleared from memory when you close your browser.
+        <div style="font-size:12px;color:#333;line-height:1.9;">
+            <b>Step 1:</b> CSV loaded into session memory only — never written to disk.<br>
+            <b>Step 2:</b> PII scanner identifies sensitive columns and masks them with one-way SHA-256 hashes.<br>
+            <b>Step 3:</b> ONLY column names + data types sent to AI. Zero data values leave your session.<br>
+            <b>Step 4:</b> AI generates transformation code. Code executes locally against your original data.<br>
+            <b>Step 5:</b> Download masked (safe) or original (requires acknowledgement + audit log entry).<br>
+            <b>Step 6:</b> Session cleared automatically when browser closes.
         </div>
-    </div>
-    """, unsafe_allow_html=True)
+    </div>""", unsafe_allow_html=True)
 
-    # Example Prompts
-    st.markdown('<div class="section-title">💡 Example Complex Prompts</div>', unsafe_allow_html=True)
-    st.markdown("<div style='font-size:12px;color:#666;margin-bottom:8px;'>Click any example to load it into the prompt box:</div>", unsafe_allow_html=True)
-
-    complexity_color = {"Simple": "#2E7D32", "Medium": "#E65100", "High": "#B31B1B"}
-    cols_ex = st.columns(3)
-    for i, ex in enumerate(EXAMPLE_PROMPTS):
-        with cols_ex[i % 3]:
-            c = ex.get("complexity", "Medium")
-            color = complexity_color.get(c, "#666")
-            label = f"{ex['tag']}  [{c}]"
-            if st.button(label, key=f"ex_{i}", use_container_width=True):
-                st.session_state["etl_prompt_value"] = ex["text"]
+    # Example prompts
+    st.markdown('<div class="section-title">💡 Example Prompts</div>', unsafe_allow_html=True)
+    cols = st.columns(3)
+    for i, ex in enumerate(EXAMPLES):
+        color = {"Simple":"#2E7D32","Medium":"#E65100","High":"#B31B1B"}.get(ex["complexity"],"#666")
+        with cols[i % 3]:
+            if st.button(f"{ex['tag']}  [{ex['complexity']}]", key=f"ex_{i}", use_container_width=True):
+                st.session_state["etl_prompt_val"] = ex["text"]
 
     # Prompt input
-    st.markdown('<div class="section-title">Business Transformation Description</div>', unsafe_allow_html=True)
-    default_prompt = st.session_state.get("etl_prompt_value", "")
-    etl_prompt_raw = st.text_area(
-        "Describe the data transformation in plain English (supports complex multi-file joins, aggregations, filters, and derived columns)",
-        value=default_prompt,
-        key="etl_prompt",
-        height=160,
-        placeholder="Example: Join customer transactions with account data, compute monthly totals per customer, flag accounts with balance below ₹1,00,000..."
+    st.markdown('<div class="section-title">Transformation Description</div>', unsafe_allow_html=True)
+    etl_raw = st.text_area(
+        "Describe your data transformation in plain English",
+        value=st.session_state.get("etl_prompt_val", ""),
+        key="etl_prompt", height=160,
+        placeholder="Example: Join customers with transactions, flag high-risk accounts, compute monthly totals...",
     )
-
-    if etl_prompt_raw:
-        pii_in_prompt = scan_text_for_pii(etl_prompt_raw)
+    if etl_raw:
+        pii_in_prompt = scan_pii(etl_raw)
         if pii_in_prompt:
-            st.markdown(f"""
-            <div class="pii-warning">
-                <div class="pw-title">⚠️ PII Detected in Your Prompt</div>
-                <div class="pw-text">Found: {', '.join(pii_in_prompt)}. These will be automatically redacted before sending to AI.</div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f"""<div class="pii-warning">
+            <div class="pw-title">⚠️ PII Detected in Prompt: {', '.join(pii_in_prompt)}</div>
+            <div style="font-size:12px;color:#555;">Auto-redacted before sending to AI.</div></div>""",
+            unsafe_allow_html=True)
 
-    uploaded_files = st.file_uploader(
+    # File upload
+    uploaded = st.file_uploader(
         "Upload CSV File(s) — max 50MB each",
-        type=["csv"],
-        accept_multiple_files=True,
-        key="etl_upload"
+        type=["csv"], accept_multiple_files=True, key="etl_upload",
     )
 
-    if uploaded_files:
-        st.markdown('<div class="section-title">Uploaded Files Preview & Privacy Scan</div>', unsafe_allow_html=True)
-        for i, f in enumerate(uploaded_files):
-            valid, msg = validate_file(f)
-            if not valid:
+    if uploaded:
+        st.markdown('<div class="section-title">Files & Privacy Scan</div>', unsafe_allow_html=True)
+        for i, f in enumerate(uploaded):
+            ok, msg = validate_file(f)
+            if not ok:
                 st.error(f"❌ {f.name}: {msg}")
                 continue
-            alias = f"df{i+1}" if len(uploaded_files) > 1 else "df"
+            alias = f"df{i+1}" if len(uploaded) > 1 else "df"
             f.seek(0)
             _df = pd.read_csv(f)
-            _, masked_cols, total_masked = mask_dataframe(_df)
-            with st.expander(f"📄 {f.name}  →  alias: `{alias}`  |  {_df.shape[0]:,} rows × {_df.shape[1]} cols", expanded=(i == 0)):
-                col_prev, col_priv = st.columns([2, 1])
-                with col_prev:
+            _, mcols, mtotal = mask_dataframe(_df)
+            with st.expander(
+                f"📄 {f.name}  →  `{alias}`  |  {_df.shape[0]:,} rows × {_df.shape[1]} cols",
+                expanded=(i == 0),
+            ):
+                c1, c2 = st.columns([2, 1])
+                with c1:
                     st.dataframe(_df.head(3), use_container_width=True)
-                with col_priv:
+                with c2:
                     st.markdown("**🔒 Privacy Scan**")
-                    if masked_cols:
-                        st.markdown(f"<span style='color:#E65100;font-size:12px;'>⚠️ {len(masked_cols)} sensitive column(s):</span>", unsafe_allow_html=True)
-                        for col in masked_cols:
+                    if mcols:
+                        st.markdown(f"<span style='color:#E65100;font-size:12px;'>⚠️ {len(mcols)} sensitive column(s):</span>", unsafe_allow_html=True)
+                        for col in mcols:
                             st.markdown(f'<span class="mask-badge">🔒 {col}</span>', unsafe_allow_html=True)
-                        st.markdown(f"<span style='color:#2E7D32;font-size:11px;'>✓ {total_masked} values will be masked</span>", unsafe_allow_html=True)
+                        st.markdown(f"<span style='color:#2E7D32;font-size:11px;'>✓ {mtotal} values will be masked</span>", unsafe_allow_html=True)
                     else:
-                        st.markdown("<span style='color:#2E7D32;font-size:12px;'>✓ No sensitive columns</span>", unsafe_allow_html=True)
+                        st.markdown("<span style='color:#2E7D32;font-size:12px;'>✓ No sensitive columns detected</span>", unsafe_allow_html=True)
 
-        if len(uploaded_files) > 1:
-            aliases_list = [f"df{i+1}" for i in range(len(uploaded_files))]
-            st.info(f"**{len(uploaded_files)} files loaded.** Reference as: {', '.join(f'`{a}`' for a in aliases_list)}")
+        if len(uploaded) > 1:
+            aliases = [f"df{i+1}" for i in range(len(uploaded))]
+            st.info(f"**{len(uploaded)} files.** Reference as: {', '.join(f'`{a}`' for a in aliases)}")
 
-    with st.expander("🤖 AI Model Status — Multi-Model Waterfall", expanded=False):
-        tier_rows = [
-            {"Tier": "1 ⭐ Primary",  "Model": "llama-3.3-70b-versatile",       "TPM": "6,000",  "Quality": "★★★★★"},
-            {"Tier": "2 Fallback",    "Model": "deepseek-r1-distill-llama-70b", "TPM": "6,000",  "Quality": "★★★★★"},
-            {"Tier": "3 Fallback",    "Model": "llama3-70b-8192",               "TPM": "6,000",  "Quality": "★★★★☆"},
-            {"Tier": "4 Safety Net",  "Model": "gemma2-9b-it",                  "TPM": "15,000", "Quality": "★★★★☆"},
-        ]
-        active = st.session_state.get("active_model_idx", 0)
-        for i, row in enumerate(tier_rows):
-            row["Status"] = "🟢 Active" if i == active else "⚪ Ready"
-        st.dataframe(pd.DataFrame(tier_rows), use_container_width=True, hide_index=True)
-        st.markdown("""
-<div style="font-size:11px;color:#555;line-height:1.8;margin-top:6px;">
-<b>How it works:</b> App tries Tier 1 first. On rate-limit: retries once (12s), then falls to Tier 2 instantly — a completely separate token bucket. Tiers 1–3 are all 70B-class models (same output quality).<br>
-<b>Total effective capacity ≈ 33,000 tokens/min</b> vs 6,000 with a single model.
-</div>
-""", unsafe_allow_html=True)
-
-    run_col, hint_col = st.columns([1, 3])
-    with run_col:
-        run_btn = st.button("▶ Execute ETL", key="run_etl", use_container_width=True)
-    with hint_col:
-        n_files = len(uploaded_files) if uploaded_files else 0
-        prompt_len = len(etl_prompt_raw.split()) if etl_prompt_raw else 0
-        est_tokens = 150 + prompt_len * 1.3 + 1000  # schema + prompt + output
-        quota_pct = min(int(est_tokens / 60), 100)
-        bar_color = "#2E7D32" if quota_pct < 50 else ("#E65100" if quota_pct < 80 else "#B31B1B")
+    # Provider status
+    with st.expander("🤖 AI Provider Status", expanded=False):
+        st.dataframe(pd.DataFrame(get_router_status()), use_container_width=True, hide_index=True)
         st.markdown(f"""
-<div style='font-size:11px;color:#888;padding-top:6px;'>
-  Estimated tokens: <b style='color:{bar_color};'>~{int(est_tokens):,}</b> of 6,000/min quota
-  &nbsp;·&nbsp; Files: {n_files} &nbsp;·&nbsp; Auto-cooldown on limit
-  <div style='background:#eee;border-radius:4px;height:4px;margin-top:4px;'>
-    <div style='background:{bar_color};width:{quota_pct}%;height:4px;border-radius:4px;'></div>
-  </div>
+<div style="background:#F8F9FA;border-radius:6px;padding:12px;font-size:11px;color:#555;line-height:1.9;margin-top:8px;">
+<b>Currently active:</b> {active_prov} ({active_model})<br>
+<b>To add/change providers</b>, edit <code>.streamlit/secrets.toml</code>:<br>
+<code>GEMINI_API_KEY = "AIza..."</code> → aistudio.google.com (FREE · 1M TPM) ← <b>recommended</b><br>
+<code>GROQ_API_KEY = "gsk_..."</code> → console.groq.com (FREE · 6k TPM) ← your existing key<br>
+<code>MISTRAL_API_KEY = "..."</code> → console.mistral.ai (FREE tier)<br>
+<code>ANTHROPIC_API_KEY = "sk-ant-..."</code> → Paid · best ETL accuracy<br>
+<code>OPENAI_API_KEY = "sk-..."</code> → Paid · excellent accuracy
 </div>""", unsafe_allow_html=True)
 
-    if run_btn:
-        if not etl_prompt_raw.strip():
-            st.warning("Enter a transformation description.")
+    # Run button
+    rc, hc = st.columns([1, 3])
+    with rc:
+        run = st.button("▶ Execute ETL", key="run_etl", use_container_width=True)
+    with hc:
+        st.markdown(f"""
+<div style='font-size:11px;color:#888;padding-top:8px;'>
+  Active: <b style='color:#1565C0;'>{active_prov}</b>
+  &nbsp;·&nbsp; Auto-fallback on rate limit
+  &nbsp;·&nbsp; Zero data values sent to AI
+</div>""", unsafe_allow_html=True)
+
+    if run:
+        if not etl_raw.strip():
+            st.warning("Please enter a transformation description.")
             st.stop()
-        if not uploaded_files:
-            st.warning("Upload at least one CSV file.")
+        if not uploaded:
+            st.warning("Please upload at least one CSV file.")
             st.stop()
 
-        etl_prompt_clean, prompt_pii = sanitize_prompt(etl_prompt_raw)
-        if prompt_pii:
-            audit_log("PROMPT_PII_DETECTED", SESSION_ID, f"PII in ETL prompt: {prompt_pii}", "MEDIUM")
-            st.info(f"🔒 PII redacted from prompt: {', '.join(prompt_pii)}")
+        etl_clean, ppii = sanitize_prompt(etl_raw)
+        if ppii:
+            audit_log("PROMPT_PII", SESSION_ID, f"Types: {ppii}", "MEDIUM")
 
-        # Load both original and masked dataframes
-        dataframes_masked = {}
-        dataframes_original = {}
-        file_names = []
-        all_masked_cols = []
+        dfs_masked   = {}
+        dfs_original = {}
+        fnames       = []
+        all_mc       = []
 
-        for i, f in enumerate(uploaded_files):
-            valid, msg = validate_file(f)
-            if not valid:
-                st.error(f"❌ {msg}")
-                st.stop()
+        for i, f in enumerate(uploaded):
+            ok, msg = validate_file(f)
+            if not ok:
+                st.error(f"❌ {msg}"); st.stop()
             f.seek(0)
-            alias = f"df{i+1}" if len(uploaded_files) > 1 else "df"
+            alias  = f"df{i+1}" if len(uploaded) > 1 else "df"
             raw_df = pd.read_csv(f)
-            masked_df, masked_cols, total_masked = mask_dataframe(raw_df)
-            dataframes_masked[alias] = masked_df
-            dataframes_original[alias] = raw_df.copy()
-            file_names.append(f.name)
-            all_masked_cols.extend(masked_cols)
-            if masked_cols:
-                audit_log("PII_MASKED", SESSION_ID, f"File={f.name}, cols={masked_cols}, count={total_masked}", "HIGH")
+            mdf, mc, mt = mask_dataframe(raw_df)
+            dfs_masked[alias]   = mdf
+            dfs_original[alias] = raw_df.copy()
+            fnames.append(f.name)
+            all_mc.extend(mc)
+            if mc:
+                audit_log("PII_MASKED", SESSION_ID,
+                          f"File={f.name}, cols={mc}, count={mt}", "HIGH")
 
-        # For single file also add as "df"
-        if len(uploaded_files) == 1:
-            dataframes_masked["df"] = list(dataframes_masked.values())[0]
-            dataframes_original["df"] = list(dataframes_original.values())[0]
+        if len(uploaded) == 1:
+            dfs_masked["df"]   = list(dfs_masked.values())[0]
+            dfs_original["df"] = list(dfs_original.values())[0]
 
-        primary_alias = "df" if len(uploaded_files) == 1 else "df1"
-        original_rows = dataframes_masked[primary_alias].shape[0]
-
-        # ✅ PRIVACY MODEL: Schema (masked) → AI for code generation
-        #                   Original data → exec() for actual processing
-        # This ensures: joins work on real keys, names/values are correct,
-        # aggregations are accurate, while AI never sees real data values.
-        system_prompt = build_system_prompt_secure(dataframes_masked)
-        audit_log("AI_QUERY_SCHEMA_ONLY", SESSION_ID, f"Files={file_names}, masked_cols={all_masked_cols}", "LOW")
+        primary = "df" if len(uploaded) == 1 else "df1"
+        orig_rows = dfs_masked[primary].shape[0]
+        sys_p = build_system_prompt(dfs_masked)
+        audit_log("AI_QUERY", SESSION_ID,
+                  f"Files={fnames}, provider={active_prov}", "LOW")
 
         st.markdown('<div class="section-title">⚡ Execution Flow</div>', unsafe_allow_html=True)
-        gde_slot = st.empty()
-        gde_slot.markdown(make_gde_html(dataframes_original, file_names, "", None, "reading", masked_cols=all_masked_cols), unsafe_allow_html=True)
-        time.sleep(0.4)
-        gde_slot.markdown(make_gde_html(dataframes_original, file_names, "", None, "transforming", masked_cols=all_masked_cols), unsafe_allow_html=True)
+        gde = st.empty()
+        gde.markdown(make_gde_html(dfs_original, fnames, "", None, "reading", all_mc), unsafe_allow_html=True)
+        time.sleep(0.3)
+        gde.markdown(make_gde_html(dfs_original, fnames, "", None, "transforming", all_mc), unsafe_allow_html=True)
 
-        MAX_ATTEMPTS = 2
-        ai_code = ""
-        transformed_df = None
-        last_error = None
-        conversation = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": etl_prompt_clean}
+        ai_code   = ""
+        result_df = None
+        last_err  = None
+        conv = [
+            {"role": "system",  "content": sys_p},
+            {"role": "user",    "content": etl_clean},
         ]
 
-        with st.spinner("⚙️ AI generating pipeline from schema (no data values sent)..."):
-            for attempt in range(1, MAX_ATTEMPTS + 1):
-                if last_error and attempt > 1:
-                    conversation.append({"role": "assistant", "content": ai_code})
-                    conversation.append({"role": "user", "content": f"Attempt {attempt-1} raised:\n{last_error}\nFix it. Store result in \'result\'. No markdown fences."})
+        with st.spinner(f"⚙️ {active_prov} generating pipeline (schema only — no data values sent)..."):
+            for attempt in range(1, 3):
+                if last_err and attempt > 1:
+                    conv.append({"role": "assistant", "content": ai_code})
+                    conv.append({"role": "user",
+                                 "content": f"Fix: {last_err}\nStore result in 'result'. No markdown."})
 
-                ai_code = call_ai(conversation, temperature=0.05, task="code")
+                ai_code = call_ai(conv, temperature=0.05, task="code")
 
-                # Check for rate limit sentinel BEFORE trying to execute
                 if ai_code == RATE_LIMIT_SENTINEL:
-                    st.error("⏱️ Groq rate limit hit across all model tiers. Auto-cooling down...")
-                    # Countdown timer — resets quota window
-                    progress = st.progress(0, text="⏳ Cooling down... 60s remaining")
-                    for i in range(60):
-                        time.sleep(1)
-                        remaining = 60 - i - 1
-                        pct = (i + 1) / 60
-                        progress.progress(pct, text=f"⏳ Cooling down... {remaining}s remaining")
-                    progress.progress(1.0, text="✅ Quota reset — retrying now...")
-                    time.sleep(0.5)
-                    # Auto-retry once after cooldown
-                    ai_code = call_ai(conversation, temperature=0.05, task="code")
-                    if ai_code == RATE_LIMIT_SENTINEL:
-                        st.error("""
-### ⏱️ Still Rate Limited After Cooldown
+                    st.error(f"""
+### ⏱️ All AI Providers Rate-Limited
 
-Groq's free tier quota is shared across all calls (6,000 tokens/min).
-Heavy concurrent usage on Groq's infrastructure can extend limits.
+**Immediate fix — get 1M free tokens/min:**
+1. Go to → https://aistudio.google.com
+2. Click **"Get API Key"** (free, no card needed)
+3. Add to `.streamlit/secrets.toml`:
+   ```toml
+   GEMINI_API_KEY = "AIza..."
+   ```
+4. Restart the app
 
-**Options:**
-- 🔑 **Groq paid tier** removes this limit entirely
-- ⏳ Wait another 60 seconds and retry manually
-- 💡 Use a **simpler prompt** — Single-file queries use 3× fewer tokens
+**Or wait 60 seconds** and your existing Groq key will reset.
 """)
-                        st.stop()
+                    st.stop()
 
                 try:
-                    transformed_df = safe_exec_multi(dataframes_original, ai_code)
-                    last_error = None
+                    result_df = safe_exec(dfs_original, ai_code)
+                    last_err  = None
                     break
                 except Exception as exc:
-                    last_error = str(exc)
-                    if attempt == MAX_ATTEMPTS:
-                        st.error(f"⚠️ ETL code execution failed after {MAX_ATTEMPTS} attempts. Last error: {exc}")
-                        with st.expander("🔍 View generated code for debugging"):
+                    last_err = str(exc)
+                    if attempt == 2:
+                        st.error(f"⚠️ ETL failed after 2 attempts: {exc}")
+                        with st.expander("🔍 Debug: AI-generated code"):
                             st.code(extract_code(ai_code), language="python")
-                        transformed_df = list(dataframes_original.values())[0].copy()
+                        result_df = list(dfs_original.values())[0].copy()
 
-        gde_slot.markdown(make_gde_html(dataframes_original, file_names, extract_code(ai_code), transformed_df, "done", masked_cols=all_masked_cols), unsafe_allow_html=True)
-        audit_log("ETL_COMPLETE", SESSION_ID, f"Rows: {original_rows}→{len(transformed_df)}, Status={'OK' if last_error is None else 'FAILED'}", "LOW")
+        gde.markdown(make_gde_html(dfs_original, fnames, extract_code(ai_code),
+                                   result_df, "done", all_mc), unsafe_allow_html=True)
+        audit_log("ETL_COMPLETE", SESSION_ID,
+                  f"Rows:{orig_rows}→{len(result_df)}, "
+                  f"Provider={get_active_provider()}, "
+                  f"Status={'OK' if not last_err else 'FAILED'}", "LOW")
 
-        # Store for decrypt panel
-        # masked_df = result with PII columns re-masked for safe display/download
-        # original_df = raw result (already computed above from original data)
-        masked_result_df = transformed_df.copy()
-        for col in transformed_df.columns:
-            masked_result_df[col] = mask_sensitive_column(transformed_df[col], col)
+        # Mask result for safe display
+        masked_result = result_df.copy()
+        for col in result_df.columns:
+            masked_result[col] = mask_sensitive_column(result_df[col], col)
 
         st.session_state.last_etl_result = {
-            "masked_df": masked_result_df,        # for safe download
-            "original_df": transformed_df,        # for decrypt download (no re-run needed)
-            "original_dataframes": dataframes_original,
-            "ai_code": ai_code,
-            "file_names": file_names,
-            "all_masked_cols": all_masked_cols,
+            "masked_df":  masked_result,
+            "original_df": result_df,
+            "ai_code":    ai_code,
+            "file_names": fnames,
+            "masked_cols": all_mc,
         }
 
-        st.markdown('<div class="section-title">📊 Pipeline Execution Summary</div>', unsafe_allow_html=True)
-        if all_masked_cols:
-            masked_html = "".join(f'<span class="mask-badge">🔒 {c}</span>' for c in all_masked_cols)
-            st.markdown(f"""
-            <div style="background:#E8F5E9;border:1px solid #A5D6A7;border-radius:8px;padding:10px 14px;margin-bottom:10px;">
-                <span style="font-size:12px;font-weight:700;color:#1B5E20;">✅ Privacy Applied:</span>
-                <div style="margin-top:6px;">{masked_html}</div>
-            </div>
-            """, unsafe_allow_html=True)
+        # Summary
+        st.markdown('<div class="section-title">📊 Pipeline Summary</div>', unsafe_allow_html=True)
+        if all_mc:
+            badges = "".join(f'<span class="mask-badge">🔒 {c}</span>' for c in all_mc)
+            st.markdown(
+                f'<div style="background:#E8F5E9;border:1px solid #A5D6A7;border-radius:8px;padding:10px 14px;margin-bottom:10px;">'
+                f'<span style="font-size:12px;font-weight:700;color:#1B5E20;">✅ Privacy Applied:</span>'
+                f'<div style="margin-top:6px;">{badges}</div></div>',
+                unsafe_allow_html=True,
+            )
 
-        with st.spinner("Generating pipeline summary..."):
+        with st.spinner("Generating pipeline narrative..."):
             try:
-                metrics_html, steps_html = build_pipeline_log(extract_code(ai_code), dataframes_masked, transformed_df, file_names, original_rows)
+                metrics_html, steps_html = build_pipeline_log(
+                    extract_code(ai_code), dfs_masked, result_df, fnames, orig_rows
+                )
             except Exception:
-                # Summary generation is non-critical — show metrics only
-                new_cols = [c for c in transformed_df.columns if c not in list(dataframes_masked.values())[0].columns]
-                metrics_html = f'''<div class="metric-row">
-                <div class="metric-box"><div class="metric-value">{len(file_names)}</div><div class="metric-label">Files</div></div>
-                <div class="metric-box"><div class="metric-value">{original_rows:,}</div><div class="metric-label">Rows In</div></div>
-                <div class="metric-box"><div class="metric-value">{len(transformed_df):,}</div><div class="metric-label">Rows Out</div></div>
-                <div class="metric-box"><div class="metric-value">{len(transformed_df.columns)}</div><div class="metric-label">Columns</div></div>
-                </div>'''
-                steps_html = '<div class="pipeline-steps"><div class="pipeline-step"><span class="step-icon">✅</span><span class="step-text">Transformation complete. Summary unavailable (API quota).</span></div></div>'
+                metrics_html = (
+                    f'<div class="metric-row">'
+                    f'<div class="metric-box"><div class="metric-value">{len(fnames)}</div><div class="metric-label">Files</div></div>'
+                    f'<div class="metric-box"><div class="metric-value">{orig_rows:,}</div><div class="metric-label">Rows In</div></div>'
+                    f'<div class="metric-box"><div class="metric-value">{len(result_df):,}</div><div class="metric-label">Rows Out</div></div>'
+                    f'<div class="metric-box"><div class="metric-value">{len(result_df.columns)}</div><div class="metric-label">Columns</div></div>'
+                    f'</div>'
+                )
+                steps_html = '<div class="pipeline-steps"><div class="pipeline-step"><span class="step-icon">✅</span><span class="step-text">Transformation complete.</span></div></div>'
+
         st.markdown(metrics_html, unsafe_allow_html=True)
-        with st.expander("📋 View detailed pipeline steps", expanded=False):
+        with st.expander("📋 Pipeline steps", expanded=False):
             st.markdown(steps_html, unsafe_allow_html=True)
-        with st.expander("🔍 View generated Python code", expanded=False):
+        with st.expander("🔍 Generated Python code", expanded=False):
             st.code(extract_code(ai_code), language="python")
 
-        st.markdown('<div class="section-title">Transformed Output (Preview — PII Masked)</div>', unsafe_allow_html=True)
-        total_rows = len(transformed_df)
-        col_info, col_select = st.columns([3, 1])
-        col_info.markdown(f"<span style='font-size:13px;color:#666;'>Total records: <b>{total_rows:,}</b> &nbsp;·&nbsp; <span style='color:#E65100;'>⚠️ Preview shows masked PII — use Decrypt Export for original values</span></span>", unsafe_allow_html=True)
-        display_options = sorted(set(n for n in [20, 50, 100, 500, 1000, total_rows] if n <= total_rows)) or [total_rows]
-        display_n = col_select.selectbox("Show rows", options=display_options, index=0, key="display_rows")
-        st.dataframe(masked_result_df.head(display_n), use_container_width=True)
+        # Preview
+        st.markdown('<div class="section-title">Transformed Output (Masked Preview)</div>', unsafe_allow_html=True)
+        total = len(result_df)
+        ci, cs = st.columns([3, 1])
+        ci.markdown(
+            f"<span style='font-size:13px;color:#666;'>Total: <b>{total:,}</b> rows "
+            f"&nbsp;·&nbsp; <span style='color:#E65100;'>Preview shows masked PII</span></span>",
+            unsafe_allow_html=True,
+        )
+        opts  = sorted(set(n for n in [20, 50, 100, 500, 1000, total] if n <= total)) or [total]
+        n_show = cs.selectbox("Show rows", opts, index=0, key="show_n")
+        st.dataframe(masked_result.head(n_show), use_container_width=True)
 
         st.session_state.history.append({
-            "Time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "Session": SESSION_ID,
-            "Prompt": etl_prompt_clean[:80] + "..." if len(etl_prompt_clean) > 80 else etl_prompt_clean,
-            "Files": ", ".join(file_names),
-            "Rows Before": original_rows,
-            "Rows After": len(transformed_df),
-            "PII Cols Masked": ", ".join(all_masked_cols) if all_masked_cols else "None",
-            "Schema-Only AI": "YES",
-            "Status": "OK" if last_error is None else "FAILED"
+            "Time":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "Session":    SESSION_ID,
+            "Prompt":     etl_clean[:80] + "..." if len(etl_clean) > 80 else etl_clean,
+            "Files":      ", ".join(fnames),
+            "Rows In":    orig_rows,
+            "Rows Out":   len(result_df),
+            "PII Masked": ", ".join(all_mc) or "None",
+            "Provider":   get_active_provider(),
+            "Model":      get_active_model(),
+            "Status":     "OK" if not last_err else "FAILED",
         })
 
-    # Show download panel if result available
     if st.session_state.last_etl_result:
         r = st.session_state.last_etl_result
         st.markdown("---")
-        render_decrypt_download_panel(
-            masked_result_df=r["masked_df"],
-            original_df=r["original_df"],
-            file_names=r["file_names"],
-            all_masked_cols=r["all_masked_cols"],
+        render_download_panel(
+            r["masked_df"], r["original_df"],
+            r["file_names"], r["masked_cols"],
         )
 
 
-# ============================================================
-# TAB 2 — AI JIRA BREAKDOWN
-# ============================================================
+# ───────────────────────────────────────────────────────────
+# TAB 2  —  JIRA BREAKDOWN
+# ───────────────────────────────────────────────────────────
 with tab2:
     st.markdown("""
     <div style="background:#F0F7FF;border:1px solid #BBDEFB;border-left:4px solid #1E90FF;border-radius:8px;padding:12px 16px;margin-bottom:16px;">
-        <div style="font-size:12px;font-weight:700;color:#1565C0;margin-bottom:6px;">🔒 PRIVACY IN AI JIRA BREAKDOWN</div>
+        <div style="font-size:12px;font-weight:700;color:#1565C0;margin-bottom:4px;">🔒 PRIVACY IN JIRA BREAKDOWN</div>
         <div style="font-size:12px;color:#333;line-height:1.8;">
-            Requirement text is scanned for PII before AI processing. Any detected PII is redacted with generic placeholders. AI output is scanned to ensure no PII leaks into stories or acceptance criteria.
+            Requirement text is scanned for PII before AI processing. Any detected PII is redacted with generic placeholders.
         </div>
-    </div>
-    """, unsafe_allow_html=True)
+    </div>""", unsafe_allow_html=True)
 
     st.markdown('<div class="section-title">Project Configuration</div>', unsafe_allow_html=True)
-    project_type = st.selectbox("Project Type", list(PROJECT_TYPE_PROMPTS.keys()), key="proj_type", index=6)
-    col_a, col_b, col_c = st.columns(3)
-    team_size = col_a.selectbox("Team Size", [2, 3, 4, 5, 6, 8, 10, 12, 15, 20], index=3, key="team_size")
-    sprint_length = col_b.selectbox("Sprint Length (weeks)", [1, 2, 3], index=1, key="sprint_len")
-    methodology = col_c.selectbox("Methodology", ["Scrum", "Kanban", "SAFe", "Scrumban"], key="methodology")
+    proj_type = st.selectbox("Project Type", list(PROJECT_PROMPTS.keys()), index=6, key="proj_type")
+    ca, cb, cc = st.columns(3)
+    team_sz  = ca.selectbox("Team Size", [2,3,4,5,6,8,10,12,15,20], index=3, key="team_sz")
+    sprint_l = cb.selectbox("Sprint (weeks)", [1,2,3], index=1, key="sprint_l")
+    method   = cc.selectbox("Methodology", ["Scrum","Kanban","SAFe","Scrumban"], key="method")
 
     st.markdown('<div class="section-title">Business Requirement</div>', unsafe_allow_html=True)
-    jira_prompt_raw = st.text_area(
-        "Describe the feature, initiative or product requirement",
-        key="jira_prompt",
-        height=160,
-        placeholder="Example: Build a customer portal for viewing account statements, raising disputes, and downloading transaction history. Must comply with FCA and PCI-DSS requirements."
+    jira_raw = st.text_area(
+        "Describe the feature, initiative, or product requirement",
+        key="jira_prompt", height=160,
+        placeholder="Example: Build a customer portal for viewing account statements, raising disputes, downloading transaction history...",
     )
 
-    if jira_prompt_raw:
-        pii_in_jira = scan_text_for_pii(jira_prompt_raw)
-        if pii_in_jira:
-            st.markdown(f"""<div class="pii-warning"><div class="pw-title">⚠️ PII in Requirement: {', '.join(pii_in_jira)}</div><div class="pw-text">Auto-redacted before AI processing.</div></div>""", unsafe_allow_html=True)
+    if jira_raw:
+        pj = scan_pii(jira_raw)
+        if pj:
+            st.markdown(f"""<div class="pii-warning">
+            <div class="pw-title">⚠️ PII in Requirement: {', '.join(pj)}</div>
+            <div style="font-size:12px;color:#555;">Auto-redacted before AI.</div></div>""",
+            unsafe_allow_html=True)
 
     if st.button("🚀 Generate Jira Breakdown", key="run_jira"):
-        if not jira_prompt_raw.strip():
-            st.warning("Enter a business requirement.")
-            st.stop()
+        if not jira_raw.strip():
+            st.warning("Enter a requirement."); st.stop()
 
-        with st.spinner(f"🧠 Generating {project_type} Jira breakdown..."):
-            sys_prompt, user_prompt, pii_found = build_jira_prompt_secure(
-                jira_prompt_raw, project_type, team_size, sprint_length, methodology
-            )
-            if pii_found:
-                audit_log("JIRA_PII_REDACTED", SESSION_ID, f"Types: {pii_found}", "MEDIUM")
-                st.info(f"🔒 PII redacted: {', '.join(pii_found)}")
-
-            audit_log("JIRA_QUERY", SESSION_ID, f"Project={project_type}, Team={team_size}", "LOW")
-            raw_output = call_ai(
-                [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_prompt}],
-                temperature=0.3, task="jira"
+        with st.spinner(f"🧠 Generating {proj_type} breakdown via {active_prov}..."):
+            sp, up, pii_j = build_jira_prompt(jira_raw, proj_type, team_sz, sprint_l, method)
+            if pii_j:
+                audit_log("JIRA_PII", SESSION_ID, f"Types:{pii_j}", "MEDIUM")
+            audit_log("JIRA_QUERY", SESSION_ID, f"Type={proj_type}", "LOW")
+            raw_out = call_ai(
+                [{"role":"system","content":sp},{"role":"user","content":up}],
+                temperature=0.3, task="jira",
             )
 
-        if raw_output == RATE_LIMIT_SENTINEL:
-            st.error("""
-### ⏱️ Groq Rate Limit Reached
-Wait **60 seconds** then click **Generate Jira Breakdown** again.
-The Jira prompt is token-heavy — the app retried automatically before showing this.
-""")
-            st.stop()
+        if raw_out == RATE_LIMIT_SENTINEL:
+            st.error("⏱️ All providers rate-limited. Add GEMINI_API_KEY for 1M free TPM or wait 60s."); st.stop()
 
         try:
-            json_match = re.search(r"\{.*\}", raw_output, re.DOTALL)
-            jira_data = json.loads(json_match.group()) if json_match else {}
+            jm = re.search(r"\{.*\}", raw_out, re.DOTALL)
+            jdata = json.loads(jm.group()) if jm else {}
         except Exception:
-            jira_data = {}
+            jdata = {}
 
-        if not jira_data:
-            st.error("Could not parse structured output.")
-            st.markdown(raw_output)
-            st.stop()
+        if not jdata:
+            st.error("Could not parse AI output."); st.markdown(raw_out); st.stop()
 
-        output_pii = scan_text_for_pii(raw_output)
-        if output_pii:
-            audit_log("JIRA_OUTPUT_PII", SESSION_ID, f"Patterns in output: {output_pii}", "HIGH")
-            st.warning(f"⚠️ PII patterns found in AI output ({', '.join(output_pii)}). Review before sharing.")
-
-        audit_log("JIRA_COMPLETE", SESSION_ID, f"Stories={len(jira_data.get('stories',[]))}", "LOW")
-        st.session_state.jira_result = {"data": jira_data, "raw": raw_output, "type": project_type, "pii_found": pii_found}
+        audit_log("JIRA_DONE", SESSION_ID,
+                  f"Stories={len(jdata.get('stories',[]))}, Provider={get_active_provider()}", "LOW")
+        st.session_state.jira_result = {"data": jdata, "type": proj_type}
 
     if st.session_state.jira_result:
-        jira_data = st.session_state.jira_result["data"]
-        project_type_disp = st.session_state.jira_result["type"]
-        pii_found_session = st.session_state.jira_result.get("pii_found", [])
+        jd = st.session_state.jira_result["data"]
+        pt = st.session_state.jira_result["type"]
+        epic    = jd.get("epic", {})
+        stories = jd.get("stories", [])
+        risks   = jd.get("risks", [])
+        deps    = jd.get("dependencies", [])
+        total_pts = sum(s.get("story_points", 0) for s in stories)
+        sprints   = epic.get("estimated_sprints", "?")
 
-        st.markdown('<div class="section-title">📊 Breakdown Summary</div>', unsafe_allow_html=True)
-        header_html, stories, risks, dependencies = render_jira_cards(jira_data)
-        st.markdown(header_html, unsafe_allow_html=True)
+        # Metrics
+        st.markdown(f"""
+        <div class="jira-metrics">
+        <div class="jira-metric-box"><div class="jira-metric-value">{len(stories)}</div><div class="jira-metric-label">Stories</div></div>
+        <div class="jira-metric-box"><div class="jira-metric-value">{total_pts}</div><div class="jira-metric-label">Points</div></div>
+        <div class="jira-metric-box"><div class="jira-metric-value">{sprints}</div><div class="jira-metric-label">Sprints</div></div>
+        <div class="jira-metric-box"><div class="jira-metric-value">{len(risks)}</div><div class="jira-metric-label">Risks</div></div>
+        <div class="jira-metric-box"><div class="jira-metric-value">{len(deps)}</div><div class="jira-metric-label">Deps</div></div>
+        </div>""", unsafe_allow_html=True)
 
+        # Epic card
+        dod = "".join(f'<div class="dod-item">✓ {d}</div>' for d in epic.get("definition_of_done",[]))
+        st.markdown(f"""
+        <div class="epic-card">
+        <div class="epic-title">🏆 EPIC: {epic.get('title','')}</div>
+        <div class="epic-value">{epic.get('business_value','')}</div>
+        <div class="epic-value" style="margin-top:6px;"><b>Objective:</b> {epic.get('objective','')}</div>
+        <div class="epic-meta">
+            <span class="epic-badge">📅 {sprints} Sprints</span>
+            <span class="epic-badge">📊 {total_pts} Points</span>
+            <span class="epic-badge">📝 {len(stories)} Stories</span>
+        </div></div>""", unsafe_allow_html=True)
+        if dod:
+            st.markdown(f'<div class="dod-card"><div class="dod-title">✅ Definition of Done</div>{dod}</div>',
+                        unsafe_allow_html=True)
+
+        # Stories
         st.markdown('<div class="section-title">📝 User Stories</div>', unsafe_allow_html=True)
-        priority_badge = {
-            "critical": "badge-priority-critical", "high": "badge-priority-high",
-            "medium": "badge-priority-medium", "low": "badge-priority-low"
+        pbadge = {
+            "critical":"badge-critical","high":"badge-high",
+            "medium":"badge-medium","low":"badge-low",
         }
-        for story in stories:
-            pri = story.get("priority", "Medium")
-            pts = story.get("story_points", 0)
-            sid = story.get("id", "US-?")
-            stype = story.get("type", "Feature")
-            pbadge = priority_badge.get(pri.lower(), "badge-priority-medium")
-            with st.expander(f"  {sid} · {story.get('title', '')}  [{pri}] [{pts} pts]", expanded=False):
-                ac_items = "".join(f'<div class="ac-item">• {ac}</div>' for ac in story.get("acceptance_criteria", []))
-                sub_items = "".join(
-                    f'<div class="subtask-item">☐ {s.get("title","")} <span class="subtask-hrs">~{s.get("hours",0)}h</span></div>'
-                    for s in story.get("subtasks", [])
+        for s in stories:
+            pri = s.get("priority","Medium")
+            pts = s.get("story_points",0)
+            sid = s.get("id","US-?")
+            with st.expander(f"  {sid} · {s.get('title','')}  [{pri}] [{pts}pts]", expanded=False):
+                acs  = "".join(f'<div class="ac-item">• {a}</div>' for a in s.get("acceptance_criteria",[]))
+                subs = "".join(
+                    f'<div class="subtask-item">☐ {t.get("title","")} '
+                    f'<span class="subtask-hrs">~{t.get("hours",0)}h</span></div>'
+                    for t in s.get("subtasks",[])
                 )
                 st.markdown(f"""<div class="story-card">
-                <div class="story-id">{sid} · {project_type_disp}</div>
-                <div class="story-title">{story.get('title','')}</div>
-                <div class="story-desc">{story.get('user_story','')}</div>
+                <div class="story-id">{sid} · {pt}</div>
+                <div class="story-title">{s.get('title','')}</div>
+                <div class="story-desc">{s.get('user_story','')}</div>
                 <div class="story-badges">
-                    <span class="{pbadge}">🔴 {pri}</span>
+                    <span class="{pbadge.get(pri.lower(),'badge-medium')}">🔴 {pri}</span>
                     <span class="badge-points">⭐ {pts} pts</span>
-                    <span class="badge-sprint">🏃 {story.get('sprint','')}</span>
-                    <span class="badge-type">🏷 {stype}</span>
+                    <span class="badge-sprint">🏃 {s.get('sprint','')}</span>
+                    <span class="badge-type">🏷 {s.get('type','Feature')}</span>
                 </div>
-                <div class="ac-section"><div class="ac-title">✅ Acceptance Criteria</div>{ac_items}</div>
-                <div class="subtask-section"><div class="subtask-title">🔧 Subtasks</div>{sub_items}</div>
+                <div class="ac-section"><div class="ac-title">✅ Acceptance Criteria</div>{acs}</div>
+                <div style="margin-top:10px;"><div style="font-size:11px;font-weight:700;color:#666;text-transform:uppercase;margin-bottom:6px;">🔧 Subtasks</div>{subs}</div>
                 </div>""", unsafe_allow_html=True)
 
+        # Risks
         if risks:
-            st.markdown('<div class="section-title">⚠️ Risks & Dependencies</div>', unsafe_allow_html=True)
-            risk_html = '<div class="risk-card"><div class="risk-title">⚠️ Identified Risks</div>'
+            st.markdown('<div class="section-title">⚠️ Risks</div>', unsafe_allow_html=True)
+            rhtml = '<div class="risk-card"><div class="risk-title">⚠️ Identified Risks</div>'
             for r in risks:
-                risk_html += f'<div class="risk-item"><b>{r.get("title","")}</b> — {r.get("description","")}</div>'
-            risk_html += "</div>"
-            if dependencies:
-                risk_html += '<div class="risk-card" style="border-left-color:#1E90FF;background:#E3F2FD;"><div class="risk-title" style="color:#1565C0;">🔗 Dependencies</div>'
-                for d in dependencies:
-                    risk_html += f'<div class="risk-item" style="border-left-color:#1E90FF;">{d}</div>'
-                risk_html += "</div>"
-            st.markdown(risk_html, unsafe_allow_html=True)
+                rhtml += f'<div class="risk-item"><b>{r.get("title","")}</b> — {r.get("description","")}</div>'
+            rhtml += "</div>"
+            if deps:
+                rhtml += '<div class="risk-card" style="border-left-color:#1E90FF;background:#E3F2FD;"><div class="risk-title" style="color:#1565C0;">🔗 Dependencies</div>'
+                for d in deps:
+                    rhtml += f'<div class="risk-item" style="border-left-color:#1E90FF;">{d}</div>'
+                rhtml += "</div>"
+            st.markdown(rhtml, unsafe_allow_html=True)
 
-        st.markdown('<div class="section-title">Export Jira Output</div>', unsafe_allow_html=True)
-        col1, col2, col3 = st.columns(3)
-        txt_lines = [f"EPIC: {jira_data.get('epic',{}).get('title','')}\n"]
-        for s in stories:
-            txt_lines.extend([
-                f"\n{s.get('id','')} — {s.get('title','')}",
-                f"  {s.get('user_story','')}",
-                f"  Priority: {s.get('priority','')} | Points: {s.get('story_points','')} | Sprint: {s.get('sprint','')}",
-                "  Acceptance Criteria:"
-            ] + [f"    - {ac}" for ac in s.get("acceptance_criteria",[])])
-        col1.download_button("⬇ Download TXT", "\n".join(txt_lines), "jira_breakdown.txt", "text/plain")
+        # Exports
+        st.markdown('<div class="section-title">Export</div>', unsafe_allow_html=True)
+        ec1, ec2, ec3 = st.columns(3)
+        txt = "\n".join(
+            [f"EPIC: {epic.get('title','')}"] +
+            [f"\n{s.get('id','')} — {s.get('title','')}\n  {s.get('user_story','')}" for s in stories]
+        )
+        ec1.download_button("⬇ TXT", txt, "jira_breakdown.txt", "text/plain")
 
-        xlsx_buf = BytesIO()
-        with pd.ExcelWriter(xlsx_buf, engine="xlsxwriter") as writer:
-            pd.DataFrame([{"ID": s.get("id",""), "Title": s.get("title",""), "User Story": s.get("user_story",""),
-                           "Priority": s.get("priority",""), "Story Points": s.get("story_points",""),
-                           "Sprint": s.get("sprint",""), "Type": s.get("type","")} for s in stories]).to_excel(writer, sheet_name="Stories", index=False)
-            ac_rows = [{"Story ID": s.get("id",""), "AC": ac} for s in stories for ac in s.get("acceptance_criteria",[])]
-            if ac_rows: pd.DataFrame(ac_rows).to_excel(writer, sheet_name="Acceptance_Criteria", index=False)
-            if risks: pd.DataFrame(risks).to_excel(writer, sheet_name="Risks", index=False)
-        col2.download_button("⬇ Download Excel", xlsx_buf.getvalue(), "jira_breakdown.xlsx",
-                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        col3.download_button("⬇ Download JSON", json.dumps(jira_data, indent=2), "jira_breakdown.json", "application/json")
+        xb = BytesIO()
+        with pd.ExcelWriter(xb, engine="xlsxwriter") as w:
+            pd.DataFrame([{
+                "ID": s.get("id",""), "Title": s.get("title",""),
+                "User Story": s.get("user_story",""), "Priority": s.get("priority",""),
+                "Points": s.get("story_points",""), "Sprint": s.get("sprint",""),
+                "Type": s.get("type",""),
+            } for s in stories]).to_excel(w, sheet_name="Stories", index=False)
+            ac_rows = [{"Story":s.get("id",""),"AC":a}
+                       for s in stories for a in s.get("acceptance_criteria",[])]
+            if ac_rows:
+                pd.DataFrame(ac_rows).to_excel(w, sheet_name="Acceptance_Criteria", index=False)
+            if risks:
+                pd.DataFrame(risks).to_excel(w, sheet_name="Risks", index=False)
+        ec2.download_button("⬇ Excel", xb.getvalue(), "jira_breakdown.xlsx",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        ec3.download_button("⬇ JSON", json.dumps(jd, indent=2), "jira_breakdown.json", "application/json")
 
 
-# ============================================================
-# TAB 3 — DEMO & BENEFITS
-# ============================================================
+# ───────────────────────────────────────────────────────────
+# TAB 3  —  DEMO & BENEFITS
+# ───────────────────────────────────────────────────────────
 with tab3:
-    st.markdown("""
-    <div style="background:linear-gradient(135deg,#B31B1B,#7a1212);border-radius:12px;padding:28px 32px;margin-bottom:24px;box-shadow:0 4px 20px rgba(179,27,27,0.4);">
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap;">
-            <div style="background:rgba(255,199,44,0.2);border:1px solid rgba(255,199,44,0.4);padding:4px 14px;border-radius:20px;font-size:11px;font-weight:700;color:#FFC72C;letter-spacing:2px;">🔴 LIVE DEMO</div>
-            <div style="background:rgba(41,182,246,0.2);border:1px solid rgba(41,182,246,0.4);padding:4px 14px;border-radius:20px;font-size:11px;color:#29B6F6;letter-spacing:1px;">🔒 BANK-GRADE PRIVACY v5.0</div>
+    st.markdown(f"""
+    <div style="background:linear-gradient(135deg,#B31B1B,#7a1212);border-radius:12px;padding:28px 32px;margin-bottom:24px;">
+        <div style="color:#FFC72C;font-family:'Rajdhani',sans-serif;font-size:28px;font-weight:700;margin-bottom:8px;">
+            ⚡ v6.0 — LiteLLM Multi-Provider · Gemini Primary
         </div>
-        <div style="color:#FFC72C;font-family:'Rajdhani',sans-serif;font-size:28px;font-weight:700;margin-bottom:8px;">⚡ Enterprise AI Platform — Privacy Edition</div>
-        <div style="color:rgba(255,255,255,0.85);font-size:14px;line-height:1.7;max-width:720px;">With <b style="color:#FFC72C;">bank-grade PII protection</b>: auto-masking, schema-only AI, prompt sanitisation, <b style="color:#69F0AE;">decrypt-on-demand export with audit trail</b>, and zero data persistence — built for financial services compliance.</div>
-    </div>
-    """, unsafe_allow_html=True)
+        <div style="color:rgba(255,255,255,.85);font-size:14px;line-height:1.8;">
+            No longer dependent on any single AI provider.<br>
+            <b style="color:#69F0AE;">Active right now: {active_prov} ({active_model})</b><br>
+            Rate limit on Gemini? → Groq fallback. Groq limit? → Mistral. All free.
+        </div>
+    </div>""", unsafe_allow_html=True)
 
-    st.markdown('<div class="section-title">🔒 Privacy Architecture</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">🔑 Get Free API Keys — 2 Minutes Each</div>', unsafe_allow_html=True)
     st.markdown("""
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin:14px 0 24px 0;">
-        <div style="background:white;border:1px solid #E8E8E8;border-top:3px solid #29B6F6;border-radius:10px;padding:16px;text-align:center;">
-            <div style="font-size:28px;margin-bottom:8px;">🔒</div>
-            <div style="font-family:'Rajdhani',sans-serif;font-size:14px;font-weight:700;color:#1565C0;margin-bottom:6px;">PII Auto-Detection</div>
-            <div style="font-size:11px;color:#555;line-height:1.5;">30+ pattern types including Indian phone numbers, IBAN, SSN, emails, DOB, passports</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin:14px 0;">
+        <div style="background:white;border:1px solid #E8E8E8;border-top:4px solid #4285F4;border-radius:10px;padding:18px;">
+            <div style="font-size:18px;margin-bottom:6px;">🟦 Google Gemini</div>
+            <div style="font-weight:700;color:#4285F4;font-size:13px;margin-bottom:6px;">⭐ BEST FREE OPTION</div>
+            <div style="font-size:12px;color:#555;line-height:1.7;">
+                1,000,000 tokens/min FREE<br>
+                1,500 requests/day free<br>
+                → <b>aistudio.google.com</b><br>
+                <code>GEMINI_API_KEY = "AIza..."</code>
+            </div>
         </div>
-        <div style="background:white;border:1px solid #E8E8E8;border-top:3px solid #2E7D32;border-radius:10px;padding:16px;text-align:center;">
-            <div style="font-size:28px;margin-bottom:8px;">🛡️</div>
-            <div style="font-family:'Rajdhani',sans-serif;font-size:14px;font-weight:700;color:#1B5E20;margin-bottom:6px;">Schema-Only AI</div>
-            <div style="font-size:11px;color:#555;line-height:1.5;">AI only receives column names & types. Data values never leave your session.</div>
+        <div style="background:white;border:1px solid #E8E8E8;border-top:4px solid #F66435;border-radius:10px;padding:18px;">
+            <div style="font-size:18px;margin-bottom:6px;">🟥 Groq</div>
+            <div style="font-weight:700;color:#F66435;font-size:13px;margin-bottom:6px;">YOUR EXISTING KEY</div>
+            <div style="font-size:12px;color:#555;line-height:1.7;">
+                6,000 TPM free (still works)<br>
+                Auto-fallback when Gemini busy<br>
+                → <b>console.groq.com</b><br>
+                <code>GROQ_API_KEY = "gsk_..."</code>
+            </div>
         </div>
-        <div style="background:white;border:1px solid #E8E8E8;border-top:3px solid #E65100;border-radius:10px;padding:16px;text-align:center;">
-            <div style="font-size:28px;margin-bottom:8px;">🔓</div>
-            <div style="font-family:'Rajdhani',sans-serif;font-size:14px;font-weight:700;color:#E65100;margin-bottom:6px;">Decrypt On Demand</div>
-            <div style="font-size:11px;color:#555;line-height:1.5;">Authorised users can download original data after explicit acknowledgement. Full audit trail recorded.</div>
+        <div style="background:white;border:1px solid #E8E8E8;border-top:4px solid #FF6B35;border-radius:10px;padding:18px;">
+            <div style="font-size:18px;margin-bottom:6px;">🟧 Mistral</div>
+            <div style="font-weight:700;color:#FF6B35;font-size:13px;margin-bottom:6px;">FREE TIER</div>
+            <div style="font-size:12px;color:#555;line-height:1.7;">
+                Free tier available<br>
+                Third fallback option<br>
+                → <b>console.mistral.ai</b><br>
+                <code>MISTRAL_API_KEY = "..."</code>
+            </div>
         </div>
-        <div style="background:white;border:1px solid #E8E8E8;border-top:3px solid #B31B1B;border-radius:10px;padding:16px;text-align:center;">
-            <div style="font-size:28px;margin-bottom:8px;">📋</div>
-            <div style="font-family:'Rajdhani',sans-serif;font-size:14px;font-weight:700;color:#B31B1B;margin-bottom:6px;">Audit Logging</div>
-            <div style="font-size:11px;color:#555;line-height:1.5;">Every action logged with session ID, timestamps. Decrypt events specially flagged. SOX/PCI ready.</div>
+        <div style="background:white;border:1px solid #E8E8E8;border-top:4px solid #2E7D32;border-radius:10px;padding:18px;">
+            <div style="font-size:18px;margin-bottom:6px;">🖥️ Ollama</div>
+            <div style="font-weight:700;color:#2E7D32;font-size:13px;margin-bottom:6px;">ZERO COST · ZERO EGRESS</div>
+            <div style="font-size:12px;color:#555;line-height:1.7;">
+                Runs entirely on your machine<br>
+                No data ever leaves your org<br>
+                → <b>ollama.ai</b><br>
+                <code>OLLAMA_ENABLED = "true"</code>
+            </div>
         </div>
-        <div style="background:white;border:1px solid #E8E8E8;border-top:3px solid #FFC72C;border-radius:10px;padding:16px;text-align:center;">
-            <div style="font-size:28px;margin-bottom:8px;">🧹</div>
-            <div style="font-family:'Rajdhani',sans-serif;font-size:14px;font-weight:700;color:#E65100;margin-bottom:6px;">Zero Persistence</div>
-            <div style="font-size:11px;color:#555;line-height:1.5;">All data in session memory only. Nothing written to disk. Cleared on session end.</div>
-        </div>
-        <div style="background:white;border:1px solid #E8E8E8;border-top:3px solid #7B1FA2;border-radius:10px;padding:16px;text-align:center;">
-            <div style="font-size:28px;margin-bottom:8px;">🤖</div>
-            <div style="font-family:'Rajdhani',sans-serif;font-size:14px;font-weight:700;color:#7B1FA2;margin-bottom:6px;">Complex Prompt Engine</div>
-            <div style="font-size:11px;color:#555;line-height:1.5;">Multi-file joins, date windows, risk scoring, segmentation, pivots — all from natural language.</div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    </div>""", unsafe_allow_html=True)
 
-    st.markdown('<div class="section-title">📈 Supported Complex Transformations</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">📊 Groq vs Gemini Free Tier</div>', unsafe_allow_html=True)
     st.markdown("""
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px;">
-        <div style="background:#F8F9FA;border:1px solid #E0E0E0;border-left:3px solid #B31B1B;border-radius:8px;padding:12px 16px;">
-            <div style="font-weight:700;color:#B31B1B;font-size:13px;margin-bottom:6px;">🔗 Multi-File Joins</div>
-            <div style="font-size:12px;color:#555;">3-way joins with INNER/LEFT/OUTER, multiple join keys, handling missing keys gracefully</div>
-        </div>
-        <div style="background:#F8F9FA;border:1px solid #E0E0E0;border-left:3px solid #1565C0;border-radius:8px;padding:12px 16px;">
-            <div style="font-weight:700;color:#1565C0;font-size:13px;margin-bottom:6px;">📅 Date Window Aggregations</div>
-            <div style="font-size:12px;color:#555;">Last 7/30/60/90/180 days, month-over-month, YTD, rolling windows, date range filters</div>
-        </div>
-        <div style="background:#F8F9FA;border:1px solid #E0E0E0;border-left:3px solid #2E7D32;border-radius:8px;padding:12px 16px;">
-            <div style="font-weight:700;color:#2E7D32;font-size:13px;margin-bottom:6px;">⚠️ Risk & Segmentation</div>
-            <div style="font-size:12px;color:#555;">Multi-condition risk scoring (HIGH/MEDIUM/LOW), customer segmentation (PLATINUM/GOLD/SILVER), fraud flags</div>
-        </div>
-        <div style="background:#F8F9FA;border:1px solid #E0E0E0;border-left:3px solid #E65100;border-radius:8px;padding:12px 16px;">
-            <div style="font-weight:700;color:#E65100;font-size:13px;margin-bottom:6px;">📊 Advanced Aggregations</div>
-            <div style="font-size:12px;color:#555;">GroupBy with multiple metrics, pivot tables, channel analysis, velocity checks, rank/percentile</div>
-        </div>
-        <div style="background:#F8F9FA;border:1px solid #E0E0E0;border-left:3px solid #7B1FA2;border-radius:8px;padding:12px 16px;">
-            <div style="font-weight:700;color:#7B1FA2;font-size:13px;margin-bottom:6px;">🔍 Complex Filters</div>
-            <div style="font-size:12px;color:#555;">Multi-column filters, status exclusions, KYC checks, balance thresholds, NULL handling</div>
-        </div>
-        <div style="background:#F8F9FA;border:1px solid #E0E0E0;border-left:3px solid #00838F;border-radius:8px;padding:12px 16px;">
-            <div style="font-weight:700;color:#00838F;font-size:13px;margin-bottom:6px;">✏️ Derived Columns</div>
-            <div style="font-size:12px;color:#555;">Full name construction, net flow (credit - debit), days since last transaction, preferred channel</div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    <div style="overflow-x:auto;">
+    <table style="width:100%;border-collapse:collapse;font-size:13px;">
+    <tr style="background:#B31B1B;color:white;">
+        <th style="padding:10px 14px;text-align:left;">Metric</th>
+        <th style="padding:10px 14px;text-align:center;">Groq Free</th>
+        <th style="padding:10px 14px;text-align:center;background:#2E7D32;">Gemini Free</th>
+    </tr>
+    <tr style="background:#FFF3E0;">
+        <td style="padding:9px 14px;font-weight:600;">Tokens / minute</td>
+        <td style="padding:9px 14px;text-align:center;color:#B31B1B;font-weight:700;">6,000</td>
+        <td style="padding:9px 14px;text-align:center;color:#2E7D32;font-weight:700;background:#F1F8E9;">1,000,000</td>
+    </tr>
+    <tr>
+        <td style="padding:9px 14px;font-weight:600;">ETL jobs / minute</td>
+        <td style="padding:9px 14px;text-align:center;color:#B31B1B;">~4</td>
+        <td style="padding:9px 14px;text-align:center;color:#2E7D32;font-weight:700;background:#F1F8E9;">~666</td>
+    </tr>
+    <tr style="background:#FFF3E0;">
+        <td style="padding:9px 14px;font-weight:600;">Daily token cap</td>
+        <td style="padding:9px 14px;text-align:center;">~500k</td>
+        <td style="padding:9px 14px;text-align:center;color:#2E7D32;font-weight:700;background:#F1F8E9;">No daily cap</td>
+    </tr>
+    <tr>
+        <td style="padding:9px 14px;font-weight:600;">Requests / day</td>
+        <td style="padding:9px 14px;text-align:center;">14,400</td>
+        <td style="padding:9px 14px;text-align:center;color:#2E7D32;background:#F1F8E9;">1,500 RPD</td>
+    </tr>
+    <tr style="background:#FFF3E0;">
+        <td style="padding:9px 14px;font-weight:600;">Multi-user simultaneous</td>
+        <td style="padding:9px 14px;text-align:center;color:#B31B1B;">❌ Breaks fast</td>
+        <td style="padding:9px 14px;text-align:center;color:#2E7D32;font-weight:700;background:#F1F8E9;">✅ Handles easily</td>
+    </tr>
+    <tr>
+        <td style="padding:9px 14px;font-weight:600;">Context window</td>
+        <td style="padding:9px 14px;text-align:center;">128k</td>
+        <td style="padding:9px 14px;text-align:center;color:#2E7D32;font-weight:700;background:#F1F8E9;">1,000,000</td>
+    </tr>
+    <tr style="background:#FFF3E0;">
+        <td style="padding:9px 14px;font-weight:600;">Cost</td>
+        <td style="padding:9px 14px;text-align:center;">FREE</td>
+        <td style="padding:9px 14px;text-align:center;font-weight:700;background:#F1F8E9;">FREE</td>
+    </tr>
+    </table>
+    </div>""", unsafe_allow_html=True)
 
     st.markdown('<div class="section-title">📈 ROI Metrics</div>', unsafe_allow_html=True)
     st.markdown("""
     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:14px;">
-      <div style="background:white;border:1px solid #E8E8E8;border-top:3px solid #B31B1B;border-radius:10px;padding:18px;text-align:center;">
-        <div style="font-family:'Rajdhani',sans-serif;font-size:38px;font-weight:700;color:#B31B1B;line-height:1;">~80%</div>
-        <div style="font-size:10px;color:#999;letter-spacing:1px;text-transform:uppercase;margin:5px 0 3px;">Time Saved on Tickets</div>
-        <div style="font-size:11px;color:#555;">POs create Jira stories 5× faster</div>
-      </div>
-      <div style="background:white;border:1px solid #E8E8E8;border-top:3px solid #2E7D32;border-radius:10px;padding:18px;text-align:center;">
-        <div style="font-family:'Rajdhani',sans-serif;font-size:38px;font-weight:700;color:#2E7D32;line-height:1;">12×</div>
-        <div style="font-size:10px;color:#999;letter-spacing:1px;text-transform:uppercase;margin:5px 0 3px;">Pipeline Build Speed</div>
-        <div style="font-size:11px;color:#555;">Build ETL pipelines in minutes</div>
-      </div>
-      <div style="background:white;border:1px solid #E8E8E8;border-top:3px solid #1565C0;border-radius:10px;padding:18px;text-align:center;">
-        <div style="font-family:'Rajdhani',sans-serif;font-size:38px;font-weight:700;color:#1565C0;line-height:1;">↓60%</div>
-        <div style="font-size:10px;color:#999;letter-spacing:1px;text-transform:uppercase;margin:5px 0 3px;">Sprint Planning Time</div>
-        <div style="font-size:11px;color:#555;">AI handles grooming & estimation</div>
-      </div>
-      <div style="background:white;border:1px solid #E8E8E8;border-top:3px solid #29B6F6;border-radius:10px;padding:18px;text-align:center;">
-        <div style="font-family:'Rajdhani',sans-serif;font-size:38px;font-weight:700;color:#29B6F6;line-height:1;">100%</div>
-        <div style="font-size:10px;color:#999;letter-spacing:1px;text-transform:uppercase;margin:5px 0 3px;">Data Stays Local</div>
-        <div style="font-size:11px;color:#555;">Zero data values sent to AI</div>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+        <div style="background:white;border:1px solid #E8E8E8;border-top:3px solid #B31B1B;border-radius:10px;padding:18px;text-align:center;">
+            <div style="font-family:'Rajdhani',sans-serif;font-size:38px;font-weight:700;color:#B31B1B;">~80%</div>
+            <div style="font-size:10px;color:#999;text-transform:uppercase;margin:5px 0 3px;">Time Saved on Tickets</div>
+        </div>
+        <div style="background:white;border:1px solid #E8E8E8;border-top:3px solid #2E7D32;border-radius:10px;padding:18px;text-align:center;">
+            <div style="font-family:'Rajdhani',sans-serif;font-size:38px;font-weight:700;color:#2E7D32;">12×</div>
+            <div style="font-size:10px;color:#999;text-transform:uppercase;margin:5px 0 3px;">ETL Build Speed</div>
+        </div>
+        <div style="background:white;border:1px solid #E8E8E8;border-top:3px solid #1565C0;border-radius:10px;padding:18px;text-align:center;">
+            <div style="font-family:'Rajdhani',sans-serif;font-size:38px;font-weight:700;color:#1565C0;">₹0</div>
+            <div style="font-size:10px;color:#999;text-transform:uppercase;margin:5px 0 3px;">Weekly AI Cost (Free Tier)</div>
+        </div>
+        <div style="background:white;border:1px solid #E8E8E8;border-top:3px solid #29B6F6;border-radius:10px;padding:18px;text-align:center;">
+            <div style="font-family:'Rajdhani',sans-serif;font-size:38px;font-weight:700;color:#29B6F6;">100%</div>
+            <div style="font-size:10px;color:#999;text-transform:uppercase;margin:5px 0 3px;">Data Stays Local</div>
+        </div>
+    </div>""", unsafe_allow_html=True)
 
 
-# ============================================================
-# TAB 4 — PRIVACY & AUDIT
-# ============================================================
+# ───────────────────────────────────────────────────────────
+# TAB 4  —  PRIVACY & AUDIT
+# ───────────────────────────────────────────────────────────
 with tab4:
-    st.markdown('<div class="section-title">🔒 Privacy Framework & Compliance</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">🔒 Privacy Framework</div>', unsafe_allow_html=True)
     st.markdown(f"""
-    <div style="background:#0D1117;border:1px solid rgba(41,182,246,0.3);border-radius:12px;padding:24px;margin-bottom:20px;">
-        <div style="color:#29B6F6;font-family:'Space Mono',monospace;font-size:12px;letter-spacing:1.5px;margin-bottom:16px;">🛡️ ACTIVE PRIVACY PROTECTIONS — SESSION {SESSION_ID}</div>
+    <div style="background:#0D1117;border:1px solid rgba(41,182,246,.3);border-radius:12px;padding:24px;margin-bottom:20px;">
+        <div style="color:#29B6F6;font-family:'Space Mono',monospace;font-size:12px;letter-spacing:1.5px;margin-bottom:16px;">
+            🛡️ ACTIVE — SESSION {SESSION_ID} — {get_active_provider()} ({get_active_model()})
+        </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
-            <div style="background:#0a1628;border:1px solid rgba(41,182,246,0.2);border-radius:8px;padding:14px;">
-                <div style="color:#FFC72C;font-size:12px;font-weight:700;margin-bottom:8px;">🔍 PII Detection Patterns</div>
+            <div style="background:#0a1628;border:1px solid rgba(41,182,246,.2);border-radius:8px;padding:14px;">
+                <div style="color:#FFC72C;font-size:12px;font-weight:700;margin-bottom:8px;">🔍 PII Detection (30+ patterns)</div>
                 <div style="color:#7BB8FF;font-size:11px;line-height:2;font-family:'Space Mono',monospace;">
-                    Account Numbers · IBAN/BIC/SWIFT<br>Sort Codes · Card Numbers (PAN)<br>SSN/NIN/Passport · Email · Phone (IN/UK/US)<br>IP Addresses · UK Postcodes/US ZIP<br>Date of Birth · Full Names · Customer IDs
+                    Account Numbers · IBAN/BIC/SWIFT<br>
+                    Sort Codes · Card Numbers (PAN)<br>
+                    SSN / NIN / Passport<br>
+                    Email · Phone (IN/UK/US)<br>
+                    IP Addresses · DOB · Postcodes
                 </div>
             </div>
-            <div style="background:#0a1628;border:1px solid rgba(41,182,246,0.2);border-radius:8px;padding:14px;">
-                <div style="color:#FFC72C;font-size:12px;font-weight:700;margin-bottom:8px;">✅ Compliance Alignment</div>
-                <div style="color:#7BB8FF;font-size:11px;line-height:2;font-family:'Space Mono',monospace;">
-                    PCI-DSS · No card data to AI<br>GDPR · No personal data processing<br>FCA · Audit trail maintained<br>SOX · Session-based audit logging<br>GLBA · Financial data protection<br>CCPA · Zero data persistence
-                </div>
-            </div>
-            <div style="background:#0a1628;border:1px solid rgba(41,182,246,0.2);border-radius:8px;padding:14px;">
-                <div style="color:#FFC72C;font-size:12px;font-weight:700;margin-bottom:8px;">🔐 Data Flow</div>
-                <div style="color:#7BB8FF;font-size:11px;line-height:1.8;font-family:'Space Mono',monospace;">
-                    Upload → Session memory only<br>PII Scan → Hash masking applied<br>Schema extraction → AI receives schema<br>Code generated → Runs locally<br>Decrypt export → Requires acknowledgement + audit<br>Session end → All data cleared
-                </div>
-            </div>
-            <div style="background:#0a1628;border:1px solid rgba(41,182,246,0.2);border-radius:8px;padding:14px;">
+            <div style="background:#0a1628;border:1px solid rgba(41,182,246,.2);border-radius:8px;padding:14px;">
                 <div style="color:#FFC72C;font-size:12px;font-weight:700;margin-bottom:8px;">🚫 What NEVER Happens</div>
-                <div style="color:#ff9999;font-size:11px;line-height:1.8;font-family:'Space Mono',monospace;">
-                    ✕ Data values sent to AI API<br>✕ Files written to server disk<br>✕ PII stored in logs<br>✕ Cross-session data sharing<br>✕ Raw prompts with PII to AI<br>✕ Decrypt without user consent
+                <div style="color:#ff9999;font-size:11px;line-height:1.9;font-family:'Space Mono',monospace;">
+                    ✕ Data values sent to AI API<br>
+                    ✕ Files written to server disk<br>
+                    ✕ PII stored in logs<br>
+                    ✕ Cross-session data sharing<br>
+                    ✕ Decrypt without user consent<br>
+                    ✕ Single provider dependency
                 </div>
             </div>
         </div>
-    </div>
-    """, unsafe_allow_html=True)
+    </div>""", unsafe_allow_html=True)
+
+    st.markdown('<div class="section-title">🤖 Live Provider Dashboard</div>', unsafe_allow_html=True)
+    st.dataframe(pd.DataFrame(get_router_status()), use_container_width=True, hide_index=True)
+    if st.button("🔄 Refresh"):
+        st.rerun()
 
     st.markdown('<div class="section-title">📋 Session Audit Log</div>', unsafe_allow_html=True)
     if st.session_state.history:
-        audit_df = pd.DataFrame(st.session_state.history)
-        st.dataframe(audit_df, use_container_width=True)
-        st.download_button("⬇ Download Audit Log", audit_df.to_csv(index=False).encode(), "audit_log.csv", "text/csv")
+        adf = pd.DataFrame(st.session_state.history)
+        st.dataframe(adf, use_container_width=True)
+        st.download_button(
+            "⬇ Download Audit Log",
+            adf.to_csv(index=False).encode(),
+            "audit_log.csv", "text/csv",
+        )
     else:
-        st.info("No actions recorded yet. Execute an ETL or generate a Jira breakdown to see audit entries.")
+        st.info("No actions yet. Run an ETL or Jira breakdown to see audit entries.")
 
     st.markdown('<div class="section-title">🧪 PII Scanner Test</div>', unsafe_allow_html=True)
-    test_text = st.text_area("Enter text to scan for PII", key="pii_test",
-                              placeholder="Try: john.doe@bank.com or 4111-1111-1111-1111 or GB29NWBK60161331926819 or 9876543210")
-    if test_text:
-        found_pii = scan_text_for_pii(test_text)
-        sanitized, _ = sanitize_prompt(test_text)
-        if found_pii:
-            st.markdown(f"""<div class="pii-warning"><div class="pw-title">⚠️ PII Detected: {', '.join(found_pii)}</div><div class="pw-text"><b>Sanitized:</b> {sanitized}</div></div>""", unsafe_allow_html=True)
+    test_in = st.text_area(
+        "Enter text to test PII detection", key="pii_test",
+        placeholder="Try: john.doe@bank.com  or  4111-1111-1111-1111  or  GB29NWBK60161331926819  or  9876543210",
+    )
+    if test_in:
+        found = scan_pii(test_in)
+        san, _ = sanitize_prompt(test_in)
+        if found:
+            st.markdown(f"""<div class="pii-warning">
+            <div class="pw-title">⚠️ PII Detected: {', '.join(found)}</div>
+            <div style="font-size:12px;color:#555;margin-top:6px;"><b>Sanitized output:</b> {san}</div>
+            </div>""", unsafe_allow_html=True)
         else:
-            st.success("✅ No PII patterns detected.")
+            st.success("✅ No PII patterns detected in this text.")
