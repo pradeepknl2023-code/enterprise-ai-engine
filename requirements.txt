@@ -1,5 +1,20 @@
-streamlit
-groq
-pandas
-numpy
-xlsxwriter
+# ============================================================
+# requirements.txt  —  Enterprise AI ETL Platform v6.0
+# ============================================================
+
+# Core framework
+streamlit>=1.35.0
+pandas>=2.0.0
+numpy>=1.26.0
+xlsxwriter>=3.1.0
+openpyxl>=3.1.0
+
+# AI Router — one package, all providers
+# Automatically handles: Gemini, Groq, OpenAI, Anthropic, Mistral, Ollama
+litellm>=1.40.0
+
+# Install:
+#   pip install -r requirements.txt
+#
+# Then add ONE key to .streamlit/secrets.toml and run:
+#   streamlit run app.py
