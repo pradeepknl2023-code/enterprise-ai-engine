@@ -283,45 +283,35 @@ CUST008,Divya,Reddy,VERIFIED,RETAIL,STANDARD,Ahmedabad,2023-01-18
 CUST009,Rajesh,Joshi,UNVERIFIED,RETAIL,SILVER,Jaipur,2022-12-07
 CUST010,Sneha,Menon,VERIFIED,CORPORATE,PLATINUM,Surat,2020-07-25
 """
+# 10 customers — concise sample for demo
 
 SAMPLE_ACCOUNTS_CSV = """ACCOUNT_ID,CUSTOMER_ID,ACCOUNT_TYPE,STATUS,BALANCE,OPEN_DATE,BRANCH_CODE
 ACC1001,CUST001,SAVINGS,ACTIVE,125000.50,2022-01-20,BR001
-ACC1002,CUST001,CURRENT,ACTIVE,450000.00,2022-03-15,BR001
-ACC1003,CUST002,SAVINGS,ACTIVE,890000.75,2021-06-25,BR002
-ACC1004,CUST003,SAVINGS,INACTIVE,5000.00,2023-03-15,BR003
-ACC1005,CUST004,SAVINGS,ACTIVE,210000.25,2020-11-10,BR004
-ACC1006,CUST005,CURRENT,SUSPENDED,75000.00,2023-08-28,BR005
-ACC1007,CUST006,SAVINGS,ACTIVE,1200000.00,2021-09-20,BR006
-ACC1008,CUST006,CURRENT,ACTIVE,3400000.50,2021-09-20,BR006
-ACC1009,CUST007,SAVINGS,ACTIVE,320000.00,2022-05-05,BR007
-ACC1010,CUST008,SAVINGS,ACTIVE,95000.00,2023-01-25,BR008
-ACC1011,CUST009,SAVINGS,DORMANT,12000.50,2022-12-10,BR009
-ACC1012,CUST010,SAVINGS,ACTIVE,780000.00,2020-07-30,BR010
-ACC1013,CUST010,CURRENT,ACTIVE,2100000.00,2021-02-14,BR010
+ACC1002,CUST002,SAVINGS,ACTIVE,890000.75,2021-06-25,BR002
+ACC1003,CUST003,SAVINGS,INACTIVE,5000.00,2023-03-15,BR003
+ACC1004,CUST004,SAVINGS,ACTIVE,210000.25,2020-11-10,BR004
+ACC1005,CUST005,CURRENT,SUSPENDED,75000.00,2023-08-28,BR005
+ACC1006,CUST006,SAVINGS,ACTIVE,1200000.00,2021-09-20,BR006
+ACC1007,CUST006,CURRENT,ACTIVE,3400000.50,2021-09-20,BR006
+ACC1008,CUST007,SAVINGS,ACTIVE,320000.00,2022-05-05,BR007
+ACC1009,CUST008,SAVINGS,ACTIVE,95000.00,2023-01-25,BR008
+ACC1010,CUST009,SAVINGS,DORMANT,12000.50,2022-12-10,BR009
 """
+# 10 accounts — 1 per customer (CUST006 has 2 to demo multi-account joins)
 
 SAMPLE_TRANSACTIONS_CSV = """TRANSACTION_ID,ACCOUNT_ID,CUSTOMER_ID,TRANSACTION_DATE,AMOUNT,TRANSACTION_TYPE,CHANNEL,STATUS,DESCRIPTION
 TXN10001,ACC1001,CUST001,2024-01-05,15000.00,DEBIT,ONLINE,COMPLETED,Online Shopping
 TXN10002,ACC1001,CUST001,2024-01-10,50000.00,CREDIT,BRANCH,COMPLETED,Salary Credit
-TXN10003,ACC1003,CUST002,2024-01-12,200000.00,DEBIT,NEFT,COMPLETED,Vendor Payment
-TXN10004,ACC1005,CUST004,2024-01-15,8000.00,DEBIT,ATM,COMPLETED,ATM Withdrawal
-TXN10005,ACC1007,CUST006,2024-01-18,500000.00,CREDIT,RTGS,COMPLETED,Business Income
-TXN10006,ACC1007,CUST006,2024-01-20,750000.00,DEBIT,NEFT,COMPLETED,Investment Transfer
-TXN10007,ACC1009,CUST007,2024-01-22,12000.00,DEBIT,UPI,COMPLETED,UPI Payment
-TXN10008,ACC1010,CUST008,2024-01-25,5000.00,CREDIT,ONLINE,COMPLETED,Refund
-TXN10009,ACC1012,CUST010,2024-01-28,300000.00,DEBIT,RTGS,COMPLETED,Property Tax
-TXN10010,ACC1003,CUST002,2024-02-02,180000.00,CREDIT,NEFT,COMPLETED,Client Payment
-TXN10011,ACC1001,CUST001,2024-02-05,25000.00,DEBIT,ONLINE,COMPLETED,Insurance Premium
-TXN10012,ACC1007,CUST006,2024-02-08,1200000.00,CREDIT,RTGS,COMPLETED,Large Deposit
-TXN10013,ACC1009,CUST007,2024-02-10,45000.00,DEBIT,NEFT,COMPLETED,Rent Payment
-TXN10014,ACC1012,CUST010,2024-02-12,150000.00,CREDIT,BRANCH,COMPLETED,Cash Deposit
-TXN10015,ACC1005,CUST004,2024-02-15,20000.00,DEBIT,ONLINE,COMPLETED,Shopping
-TXN10016,ACC1003,CUST002,2024-02-18,350000.00,DEBIT,RTGS,COMPLETED,Supplier Payment
-TXN10017,ACC1001,CUST001,2024-02-20,10000.00,CREDIT,UPI,COMPLETED,UPI Received
-TXN10018,ACC1013,CUST010,2024-02-22,900000.00,DEBIT,NEFT,COMPLETED,Business Transfer
-TXN10019,ACC1007,CUST006,2024-02-25,250000.00,DEBIT,ONLINE,COMPLETED,Equipment Purchase
-TXN10020,ACC1009,CUST007,2024-02-28,18000.00,DEBIT,UPI,COMPLETED,Bill Payment
+TXN10003,ACC1002,CUST002,2024-01-12,200000.00,DEBIT,NEFT,COMPLETED,Vendor Payment
+TXN10004,ACC1004,CUST004,2024-01-15,8000.00,DEBIT,ATM,COMPLETED,ATM Withdrawal
+TXN10005,ACC1006,CUST006,2024-01-18,500000.00,CREDIT,RTGS,COMPLETED,Business Income
+TXN10006,ACC1006,CUST006,2024-01-20,750000.00,DEBIT,NEFT,COMPLETED,Investment Transfer
+TXN10007,ACC1008,CUST007,2024-01-22,12000.00,DEBIT,UPI,COMPLETED,UPI Payment
+TXN10008,ACC1009,CUST008,2024-01-25,5000.00,CREDIT,ONLINE,COMPLETED,Refund
+TXN10009,ACC1010,CUST009,2024-02-02,300000.00,DEBIT,RTGS,COMPLETED,Property Tax
+TXN10010,ACC1001,CUST001,2024-02-05,25000.00,DEBIT,ONLINE,COMPLETED,Insurance Premium
 """
+# 10 transactions — covers all channels (ONLINE/NEFT/ATM/RTGS/UPI) and both DEBIT/CREDIT
 
 def get_sample_dfs():
     customers = pd.read_csv(StringIO(SAMPLE_CUSTOMERS_CSV))
@@ -389,6 +379,7 @@ BUSINESS_WHITELIST = {
 # ═══════════════════════════════════════════════════════════
 # PRIVACY ENGINE
 # ═══════════════════════════════════════════════════════════
+# Patterns applied to DATA VALUES in columns (full set - more aggressive)
 SENSITIVE_PATTERNS = {
     "account_number": r'\b\d{8,17}\b',
     "sort_code":      r'\b\d{2}-\d{2}-\d{2}\b',
@@ -405,6 +396,23 @@ SENSITIVE_PATTERNS = {
     "zip_us":         r'\b\d{5}(?:-\d{4})?\b',
     "dob":            r'\b(?:0?[1-9]|[12]\d|3[01])[/-](?:0?[1-9]|1[0-2])[/-](?:19|20)\d{2}\b',
     "passport":       r'\b[A-Z]{1,2}\d{6,9}\b',
+}
+
+# Patterns safe for PROMPT TEXT — excludes SWIFT/passport which match common English words
+# SWIFT r'[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}' matches: EMPLOYEE, CUSTOMER, VERIFIED, TRANSFER etc.
+# passport r'[A-Z]{1,2}\d{6,9}' matches: column references like A1234567
+PROMPT_SAFE_PATTERNS = {
+    "account_number": r'\b\d{8,17}\b',
+    "sort_code":      r'\b\d{2}-\d{2}-\d{2}\b',
+    "card_number":    r'\b(?:\d[ -]?){13,19}\b',
+    "ssn":            r'\b\d{3}[-\s]?\d{2}[-\s]?\d{4}\b',
+    "iban":           r'\b[A-Z]{2}\d{2}[A-Z0-9]{4}\d{7}([A-Z0-9]?){0,16}\b',
+    "email":          r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
+    "phone_uk":       r'\b(?:0|\+44)[\s-]?\d{4}[\s-]?\d{6}\b',
+    "phone_us":       r'\b(?:\+1[\s-]?)?\(?\d{3}\)?[\s-]?\d{3}[\s-]?\d{4}\b',
+    "phone_in":       r'\b[6-9]\d{9}\b',
+    "ip_address":     r'\b(?:\d{1,3}\.){3}\d{1,3}\b',
+    "dob":            r'\b(?:0?[1-9]|[12]\d|3[01])[/-](?:0?[1-9]|1[0-2])[/-](?:19|20)\d{2}\b',
 }
 
 SENSITIVE_COL_KW = [
@@ -450,8 +458,9 @@ def mask_dataframe(df: pd.DataFrame):
     return masked, masked_cols, total
 
 def scan_pii(text: str) -> list:
+    """Scan prompt text — uses PROMPT_SAFE_PATTERNS to avoid false positives on common words."""
     found = []
-    for name, pat in SENSITIVE_PATTERNS.items():
+    for name, pat in PROMPT_SAFE_PATTERNS.items():
         matches = re.findall(pat, text, re.IGNORECASE)
         for m in matches:
             val = m if isinstance(m, str) else (m[0] if m else "")
@@ -461,10 +470,11 @@ def scan_pii(text: str) -> list:
     return list(dict.fromkeys(found))
 
 def sanitize_prompt(prompt: str):
+    """Sanitize prompt text — uses PROMPT_SAFE_PATTERNS only (excludes SWIFT/passport)."""
     found = scan_pii(prompt)
     sanitized = prompt
-    for pname, pat in SENSITIVE_PATTERNS.items():
-        def _replace(m):
+    for pname, pat in PROMPT_SAFE_PATTERNS.items():
+        def _replace(m, pname=pname):
             val = m.group(0)
             if val.upper() in BUSINESS_WHITELIST:
                 return val
@@ -843,6 +853,10 @@ with tab1:
             file_hint = ", ".join(ex["files"])
             if st.button(f"{ex['tag']}  [{ex['complexity']}]\n📎 {file_hint}", key=f"ex_{i}", use_container_width=True):
                 st.session_state["etl_prompt_val"] = ex["text"]
+                # KEY FIX: delete the text_area widget key so Streamlit re-renders
+                # with the new value= on next rerun (without this, value= is ignored)
+                if "etl_prompt" in st.session_state:
+                    del st.session_state["etl_prompt"]
                 # Load the required sample data into session
                 c, a, t = get_sample_dfs()
                 sample_dfs = {}
