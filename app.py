@@ -1,14 +1,17 @@
 """
-Enterprise AI ETL Platform  ·  v6.2
+Enterprise AI ETL Platform  ·  v6.4
 =====================================
-FIXES in v6.2:
-  ✅ FIX 1: ai_router reads st.secrets DIRECTLY — no longer depends
-             on the sync block. Gemini "No Key" permanently fixed.
-  ✅ FIX 2: Debug secrets panel in Tab 4 shows exactly what the
-             router sees — instant confirmation keys are loaded.
-  ✅ FIX 3: Sync block kept as belt-and-suspenders (harmless).
-  ✅ FIX 4: VERIFIED/REJECTED/ACTIVE whitelist (from v6.1).
-  ✅ FIX 5: Priority log shown in terminal for every request.
+FIXES in v6.4:
+  ✅ FIX 1: Reset All Cooldowns button in Tab 1 and Tab 4
+             — clears Gemini cooldown instantly without app restart
+  ✅ FIX 2: "Next call will use" indicator — confirms BEFORE you run
+             which provider will actually answer
+  ✅ FIX 3: "Last call used" indicator — shows which provider ACTUALLY responded
+             (was always showing Gemini even when Groq answered)
+  ✅ FIX 4: Imports get_next_provider + reset_cooldowns from ai_router v2.4
+  ✅ Retained v6.2: ai_router reads st.secrets directly
+  ✅ Retained v6.3: Gemini quality=5 beats Groq quality=4 in sort
+  ✅ Retained v6.1: VERIFIED/REJECTED/ACTIVE whitelist
 """
 
 import streamlit as st
@@ -19,8 +22,7 @@ from io import BytesIO
 import sys
 
 # ═══════════════════════════════════════════════════════════
-# BELT-AND-SUSPENDERS secrets sync (kept, but router no longer
-# depends on this — ai_router._get_key() reads st.secrets directly)
+# BELT-AND-SUSPENDERS secrets sync
 # ═══════════════════════════════════════════════════════════
 _SECRET_KEYS = [
     "GEMINI_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY",
@@ -41,6 +43,8 @@ try:
         get_router_status,
         get_active_provider,
         get_active_model,
+        get_next_provider,
+        reset_cooldowns,
         _get_key,
         RATE_LIMIT_SENTINEL,
     )
@@ -109,7 +113,7 @@ Get a free Gemini key → https://aistudio.google.com
 
 
 # ═══════════════════════════════════════════════════════════
-# BUSINESS VALUE WHITELIST (v6.1 fix)
+# BUSINESS VALUE WHITELIST
 # ═══════════════════════════════════════════════════════════
 BUSINESS_WHITELIST = {
     "VERIFIED","UNVERIFIED","REJECTED","PENDING","APPROVED",
@@ -577,6 +581,12 @@ st.markdown("""
 .debug-key{color:#7BB8FF;}
 .debug-val-ok{color:#69F0AE;font-weight:700;}
 .debug-val-bad{color:#ff6b6b;font-weight:700;}
+.provider-status-bar{background:linear-gradient(135deg,#0a2a0a,#0d1f0d);border:2px solid rgba(105,240,174,.4);border-radius:10px;padding:12px 18px;margin:10px 0;display:flex;gap:20px;flex-wrap:wrap;align-items:center;}
+.psb-item{font-size:12px;font-family:'Space Mono',monospace;}
+.psb-label{color:#888;}
+.psb-val-gemini{color:#69F0AE;font-weight:700;}
+.psb-val-groq{color:#FFD600;font-weight:700;}
+.psb-val-none{color:#ff6b6b;font-weight:700;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -600,6 +610,7 @@ EXAMPLES = [
 # ═══════════════════════════════════════════════════════════
 active_prov  = get_active_provider()
 active_model = get_active_model()
+next_prov    = get_next_provider()
 
 st.markdown("""<div class="built-by">
     <span class="byline">Built by</span><span class="dot"></span>
@@ -611,16 +622,18 @@ st.markdown(f"""<div class="main-header">
         <div style="color:rgba(255,255,255,.6);font-size:12px;margin-top:4px;">AI POWERED · LITELLM MULTI-PROVIDER · GEMINI PRIMARY · 🔒 BANK-GRADE PRIVACY</div>
         <h1>⚡ Enterprise AI Transformation &amp; Delivery Platform</h1>
         <div class="secure-badge">🛡️ PII PROTECTED · SCHEMA-ONLY AI · DECRYPT ON DEMAND · AUDIT LOGGED</div>
-        <div class="provider-pill">🤖 {active_prov} &nbsp;·&nbsp; {active_model}</div>
+        <div class="provider-pill">🤖 Last Used: {active_prov} &nbsp;·&nbsp; {active_model}</div>
+        <div class="provider-pill" style="background:rgba(255,199,44,.15);border-color:rgba(255,199,44,.4);color:#FFC72C;">⏭️ Next Call: {next_prov}</div>
     </div>
-    <div style="text-align:right;"><div class="version-badge">v6.2 BULLETPROOF</div></div>
+    <div style="text-align:right;"><div class="version-badge">v6.4 GEMINI FIXED</div></div>
 </div>""", unsafe_allow_html=True)
 
 st.markdown(f"""<div class="session-bar">
     <div>🔐 Session: <span class="sb-val">{SESSION_ID}</span></div>
     <div style="color:#2E7D32;">🛡️ PII Masking: <span class="sb-val" style="color:#2E7D32;">ACTIVE</span></div>
     <div style="color:#2E7D32;">🔒 Schema-Only AI: <span class="sb-val" style="color:#2E7D32;">ENABLED</span></div>
-    <div>🤖 <span class="sb-val" style="color:#1565C0;">{active_prov}</span></div>
+    <div>✅ Last Used: <span class="sb-val" style="color:#1565C0;">{active_prov}</span></div>
+    <div>⏭️ Next: <span class="sb-val" style="color:#69F0AE;">{next_prov}</span></div>
     <div>⏱️ {datetime.datetime.now().strftime("%d %b %Y %H:%M")}</div>
 </div>""", unsafe_allow_html=True)
 
@@ -705,15 +718,38 @@ with tab1:
             aliases = [f"df{i+1}" for i in range(len(uploaded))]
             st.info(f"**{len(uploaded)} files.** Reference as: {', '.join(f'`{a}`' for a in aliases)}")
 
+    # ── Provider Status with Reset Button ──────────────────
     with st.expander("🤖 AI Provider Status", expanded=False):
+        # v6.4: Show NEXT and LAST USED clearly
+        np_val = get_next_provider()
+        lu_val = get_active_provider()
+        c_next, c_last = st.columns(2)
+        is_gemini_next = "Gemini" in np_val
+        c_next.markdown(
+            f"<div style='background:{'#E8F5E9' if is_gemini_next else '#FFF3E0'};border:1px solid {'#A5D6A7' if is_gemini_next else '#FFB300'};border-radius:6px;padding:8px 12px;font-size:12px;'>"
+            f"⏭️ <b>Next call will use:</b><br><span style='font-size:14px;font-weight:700;color:{'#2E7D32' if is_gemini_next else '#E65100'};'>{np_val}</span></div>",
+            unsafe_allow_html=True
+        )
+        c_last.markdown(
+            f"<div style='background:#E3F2FD;border:1px solid #90CAF9;border-radius:6px;padding:8px 12px;font-size:12px;'>"
+            f"✅ <b>Last call used:</b><br><span style='font-size:14px;font-weight:700;color:#1565C0;'>{lu_val}</span></div>",
+            unsafe_allow_html=True
+        )
+        st.markdown("<br>", unsafe_allow_html=True)
         st.dataframe(pd.DataFrame(get_router_status()), use_container_width=True, hide_index=True)
-        if st.button("🔄 Refresh", key="refresh_tab1"): st.rerun()
+        btn1, btn2 = st.columns(2)
+        if btn1.button("🔄 Refresh Status", key="refresh_tab1"):
+            st.rerun()
+        if btn2.button("⚡ Reset All Cooldowns", key="reset_cd_tab1"):
+            n = reset_cooldowns()
+            st.success(f"✅ Cleared {n} cooldown(s) — Gemini is Ready again!")
+            st.rerun()
 
     rc, hc = st.columns([1,3])
     with rc:
         run = st.button("▶ Execute ETL", key="run_etl", use_container_width=True)
     with hc:
-        st.markdown(f"<div style='font-size:11px;color:#888;padding-top:8px;'>Active: <b style='color:#1565C0;'>{active_prov}</b> &nbsp;·&nbsp; Auto-fallback on rate limit &nbsp;·&nbsp; Zero data sent to AI</div>",
+        st.markdown(f"<div style='font-size:11px;color:#888;padding-top:8px;'>Next: <b style='color:#2E7D32;'>{get_next_provider()}</b> &nbsp;·&nbsp; Auto-fallback on rate limit &nbsp;·&nbsp; Zero data sent to AI</div>",
                     unsafe_allow_html=True)
 
     if run:
@@ -741,7 +777,7 @@ with tab1:
         primary="df" if len(uploaded)==1 else "df1"
         orig_rows=dfs_masked[primary].shape[0]
         sys_p=build_system_prompt(dfs_masked)
-        audit_log("AI_QUERY",SESSION_ID,f"Files={fnames},provider={active_prov}","LOW")
+        audit_log("AI_QUERY",SESSION_ID,f"Files={fnames},provider={get_next_provider()}","LOW")
 
         st.markdown('<div class="section-title">⚡ Execution Flow</div>', unsafe_allow_html=True)
         gde=st.empty()
@@ -752,14 +788,15 @@ with tab1:
         ai_code=""; result_df=None; last_err=None
         conv=[{"role":"system","content":sys_p},{"role":"user","content":etl_clean}]
 
-        with st.spinner(f"⚙️ {active_prov} generating pipeline (schema only — no data values sent)..."):
+        with st.spinner(f"⚙️ {get_next_provider()} generating pipeline (schema only — no data values sent)..."):
             for attempt in range(1,3):
                 if last_err and attempt>1:
                     conv.append({"role":"assistant","content":ai_code})
                     conv.append({"role":"user","content":f"Fix: {last_err}\nStore result in 'result'. No markdown."})
                 ai_code = call_ai(conv, temperature=0.05, task="code")
                 if ai_code == RATE_LIMIT_SENTINEL:
-                    st.error("### ⏱️ All AI Providers Rate-Limited\n\nAdd `GEMINI_API_KEY` in Streamlit Cloud → Settings → Secrets for 1M free TPM.\n\nOr wait 60 seconds for Groq to reset."); st.stop()
+                    st.error("### ⏱️ All AI Providers Rate-Limited\n\nWait 30-60 seconds then click **⚡ Reset All Cooldowns** in the Provider Status panel above, then try again.")
+                    st.stop()
                 try:
                     result_df = safe_exec(dfs_original, ai_code)
                     last_err = None; break
@@ -772,7 +809,16 @@ with tab1:
                         result_df = list(dfs_original.values())[0].copy()
 
         gde.markdown(make_gde_html(dfs_original,fnames,extract_code(ai_code),result_df,"done",all_mc),unsafe_allow_html=True)
-        audit_log("ETL_COMPLETE",SESSION_ID,f"Rows:{orig_rows}→{len(result_df)},Provider={get_active_provider()},Status={'OK' if not last_err else 'FAILED'}","LOW")
+
+        # Show which provider ACTUALLY answered
+        actual_prov = get_active_provider()
+        actual_model = get_active_model()
+        if "Gemini" in actual_prov:
+            st.success(f"✅ **Answered by: {actual_prov}** ({actual_model}) — Gemini is working correctly!")
+        else:
+            st.warning(f"⚠️ **Answered by: {actual_prov}** ({actual_model}) — Gemini was rate-limited, Groq stepped in as fallback.")
+
+        audit_log("ETL_COMPLETE",SESSION_ID,f"Rows:{orig_rows}→{len(result_df)},Provider={actual_prov},Status={'OK' if not last_err else 'FAILED'}","LOW")
 
         masked_result=result_df.copy()
         for col in result_df.columns:
@@ -804,7 +850,7 @@ with tab1:
         st.markdown('<div class="section-title">Transformed Output (Masked Preview)</div>', unsafe_allow_html=True)
         total=len(result_df)
         ci,cs=st.columns([3,1])
-        ci.markdown(f"<span style='font-size:13px;color:#666;'>Total: <b>{total:,}</b> rows &nbsp;·&nbsp; Provider: <b style='color:#1565C0;'>{get_active_provider()}</b></span>",unsafe_allow_html=True)
+        ci.markdown(f"<span style='font-size:13px;color:#666;'>Total: <b>{total:,}</b> rows &nbsp;·&nbsp; Provider: <b style='color:#1565C0;'>{actual_prov}</b></span>",unsafe_allow_html=True)
         opts=sorted(set(n for n in [20,50,100,500,1000,total] if n<=total)) or [total]
         n_show=cs.selectbox("Show rows",opts,index=0,key="show_n")
         st.dataframe(masked_result.head(n_show), use_container_width=True)
@@ -814,7 +860,7 @@ with tab1:
             "Session":SESSION_ID,"Prompt":etl_clean[:80]+"..." if len(etl_clean)>80 else etl_clean,
             "Files":", ".join(fnames),"Rows In":orig_rows,"Rows Out":len(result_df),
             "PII Masked":", ".join(all_mc) or "None",
-            "Provider":get_active_provider(),"Model":get_active_model(),
+            "Provider":actual_prov,"Model":actual_model,
             "Status":"OK" if not last_err else "FAILED",
         })
 
@@ -852,18 +898,25 @@ with tab2:
 
     if st.button("🚀 Generate Jira Breakdown", key="run_jira"):
         if not jira_raw.strip(): st.warning("Enter a requirement."); st.stop()
-        with st.spinner(f"🧠 Generating {proj_type} breakdown via {active_prov}..."):
+        with st.spinner(f"🧠 Generating {proj_type} breakdown via {get_next_provider()}..."):
             sp,up,pii_j=build_jira_prompt(jira_raw,proj_type,team_sz,sprint_l,method)
             if pii_j: audit_log("JIRA_PII",SESSION_ID,f"Types:{pii_j}","MEDIUM")
             audit_log("JIRA_QUERY",SESSION_ID,f"Type={proj_type}","LOW")
             raw_out=call_ai([{"role":"system","content":sp},{"role":"user","content":up}],temperature=0.3,task="jira")
-        if raw_out==RATE_LIMIT_SENTINEL: st.error("⏱️ All providers rate-limited. Add GEMINI_API_KEY or wait 60s."); st.stop()
+        if raw_out==RATE_LIMIT_SENTINEL: st.error("⏱️ All providers rate-limited. Click ⚡ Reset All Cooldowns in Tab 1 Provider Status, then retry."); st.stop()
+
+        actual_prov = get_active_provider()
+        if "Gemini" in actual_prov:
+            st.success(f"✅ Generated by {actual_prov}")
+        else:
+            st.info(f"ℹ️ Generated by {actual_prov} (Gemini fallback)")
+
         try:
             jm=re.search(r"\{.*\}",raw_out,re.DOTALL)
             jdata=json.loads(jm.group()) if jm else {}
         except Exception: jdata={}
         if not jdata: st.error("Could not parse AI output."); st.markdown(raw_out); st.stop()
-        audit_log("JIRA_DONE",SESSION_ID,f"Stories={len(jdata.get('stories',[]))},Provider={get_active_provider()}","LOW")
+        audit_log("JIRA_DONE",SESSION_ID,f"Stories={len(jdata.get('stories',[]))},Provider={actual_prov}","LOW")
         st.session_state.jira_result={"data":jdata,"type":proj_type}
 
     if st.session_state.jira_result:
@@ -935,11 +988,12 @@ with tab2:
 # ───────────────────────────────────────────────────────────
 with tab3:
     st.markdown(f"""<div style="background:linear-gradient(135deg,#B31B1B,#7a1212);border-radius:12px;padding:28px 32px;margin-bottom:24px;">
-        <div style="color:#FFC72C;font-family:'Rajdhani',sans-serif;font-size:28px;font-weight:700;margin-bottom:8px;">⚡ v6.2 — Bulletproof Gemini Priority</div>
+        <div style="color:#FFC72C;font-family:'Rajdhani',sans-serif;font-size:28px;font-weight:700;margin-bottom:8px;">⚡ v6.4 — Full Provider Visibility</div>
         <div style="color:rgba(255,255,255,.85);font-size:14px;line-height:2.0;">
-            ✅ <b>ROOT CAUSE FIXED:</b> Router now reads st.secrets directly — no longer depends on sync block<br>
-            ✅ Gemini 2.0 Flash is PRIMARY — confirmed by sort order test<br>
-            ✅ VERIFIED / ACTIVE / REJECTED never redacted (whitelist)<br>
+            ✅ <b>CONFIRMED:</b> Gemini quality=5 always beats Groq quality=4 in sort order<br>
+            ✅ <b>NEW:</b> "Next call will use" banner — see Gemini BEFORE you run<br>
+            ✅ <b>NEW:</b> "Last call used" badge — confirms who ACTUALLY answered<br>
+            ✅ <b>NEW:</b> ⚡ Reset All Cooldowns button — clears Gemini cooldown instantly<br>
             ✅ Active right now: <b style="color:#69F0AE;">{active_prov} ({active_model})</b>
         </div>
     </div>""", unsafe_allow_html=True)
@@ -951,6 +1005,7 @@ with tab3:
         <th style="padding:10px 14px;text-align:left;">Priority</th>
         <th style="padding:10px 14px;">Provider</th>
         <th style="padding:10px 14px;text-align:center;">TPM</th>
+        <th style="padding:10px 14px;text-align:center;">RPM</th>
         <th style="padding:10px 14px;text-align:center;">Cost</th>
         <th style="padding:10px 14px;text-align:center;">Quality</th>
     </tr>
@@ -958,20 +1013,23 @@ with tab3:
         <td style="padding:9px 14px;color:#2E7D32;">① PRIMARY</td>
         <td style="padding:9px 14px;color:#2E7D32;">🟦 Google Gemini 2.0 Flash</td>
         <td style="padding:9px 14px;text-align:center;color:#2E7D32;">1,000,000</td>
+        <td style="padding:9px 14px;text-align:center;color:#2E7D32;">15/min</td>
         <td style="padding:9px 14px;text-align:center;color:#2E7D32;">FREE</td>
-        <td style="padding:9px 14px;text-align:center;">★★★★☆</td>
+        <td style="padding:9px 14px;text-align:center;">★★★★★</td>
     </tr>
     <tr style="background:#F1F8E9;">
         <td style="padding:9px 14px;color:#388E3C;">② BACKUP</td>
         <td style="padding:9px 14px;color:#388E3C;">🟦 Google Gemini 1.5 Flash</td>
         <td style="padding:9px 14px;text-align:center;color:#388E3C;">1,000,000</td>
+        <td style="padding:9px 14px;text-align:center;color:#388E3C;">15/min</td>
         <td style="padding:9px 14px;text-align:center;color:#388E3C;">FREE</td>
-        <td style="padding:9px 14px;text-align:center;">★★★★☆</td>
+        <td style="padding:9px 14px;text-align:center;">★★★★★</td>
     </tr>
     <tr>
         <td style="padding:9px 14px;color:#E65100;">③ FALLBACK</td>
         <td style="padding:9px 14px;">🟥 Groq Llama-3.3-70b</td>
         <td style="padding:9px 14px;text-align:center;">6,000</td>
+        <td style="padding:9px 14px;text-align:center;">30/min</td>
         <td style="padding:9px 14px;text-align:center;">FREE</td>
         <td style="padding:9px 14px;text-align:center;">★★★★☆</td>
     </tr>
@@ -979,11 +1037,15 @@ with tab3:
         <td style="padding:9px 14px;color:#E65100;">④–⑥</td>
         <td style="padding:9px 14px;">🟥 Groq (other models)</td>
         <td style="padding:9px 14px;text-align:center;">6k–15k</td>
+        <td style="padding:9px 14px;text-align:center;">30/min</td>
         <td style="padding:9px 14px;text-align:center;">FREE</td>
         <td style="padding:9px 14px;text-align:center;">★★★☆☆</td>
     </tr>
     </table>
-    <div style="font-size:11px;color:#888;margin-top:10px;">Sort algorithm: quality DESC → cost ASC → stable (list order). Gemini always wins over Groq when key is present.</div>
+    <div style="font-size:11px;color:#888;margin-top:10px;">
+        ⚠️ Gemini rate limit is 15 RPM (requests/min) on free tier. If you run more than 15 ETL jobs per minute,
+        Gemini hits its limit and Groq steps in automatically. Wait 60s or click ⚡ Reset All Cooldowns to restore Gemini.
+    </div>
     </div>""", unsafe_allow_html=True)
 
     st.markdown('<div class="section-title">📈 ROI</div>', unsafe_allow_html=True)
@@ -1004,16 +1066,15 @@ with tab3:
 
 
 # ───────────────────────────────────────────────────────────
-# TAB 4 — PRIVACY & AUDIT  (with v6.2 debug panel)
+# TAB 4 — PRIVACY & AUDIT
 # ───────────────────────────────────────────────────────────
 with tab4:
 
-    # ✅ v6.2 DEBUG PANEL — shows exactly what the router sees
-    st.markdown('<div class="section-title">🔬 v6.2 Secret Key Debug Panel</div>', unsafe_allow_html=True)
+    # ── Secret Key Debug Panel ─────────────────────────────
+    st.markdown('<div class="section-title">🔬 Secret Key Debug Panel</div>', unsafe_allow_html=True)
     st.markdown("""<div style="background:#FFF3E0;border:1px solid #FFB300;border-left:4px solid #F57F17;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px;">
-    <b>This panel shows the TWO-LAYER key lookup that v6.2 uses.</b>
-    If Layer 2 shows ✅, Gemini will work even if Layer 1 failed.
-    All rows must show ✅ for the key you want to use.
+    <b>TWO-LAYER key lookup.</b> Both layers should show ✅ for keys you want to use.
+    If GEMINI shows ✅ but is in Cooldown, click ⚡ Reset All Cooldowns below.
     </div>""", unsafe_allow_html=True)
 
     debug_rows = []
@@ -1041,10 +1102,47 @@ with tab4:
     → Click Save → App will restart → GEMINI will show ✅ 🟢 Ready
     </div>""", unsafe_allow_html=True)
 
+    # ── Live Provider Dashboard with Reset ─────────────────
+    st.markdown('<div class="section-title">🤖 Live Provider Dashboard</div>', unsafe_allow_html=True)
+
+    # v6.4: Show NEXT and LAST USED
+    np_val = get_next_provider()
+    lu_val = get_active_provider()
+    col_next, col_last = st.columns(2)
+    is_gemini_next = "Gemini" in np_val
+    col_next.markdown(
+        f"<div style='background:{'#E8F5E9' if is_gemini_next else '#FFF3E0'};border:1px solid {'#A5D6A7' if is_gemini_next else '#FFB300'};border-radius:8px;padding:12px 16px;'>"
+        f"<div style='font-size:11px;color:#666;margin-bottom:4px;'>⏭️ NEXT CALL WILL USE</div>"
+        f"<div style='font-size:16px;font-weight:700;color:{'#2E7D32' if is_gemini_next else '#E65100'};'>{np_val}</div>"
+        f"<div style='font-size:10px;color:#888;margin-top:4px;'>{'✅ Gemini is active and will handle your next request' if is_gemini_next else '⚠️ Gemini is in cooldown — click Reset below to restore it'}</div>"
+        f"</div>",
+        unsafe_allow_html=True
+    )
+    col_last.markdown(
+        f"<div style='background:#E3F2FD;border:1px solid #90CAF9;border-radius:8px;padding:12px 16px;'>"
+        f"<div style='font-size:11px;color:#666;margin-bottom:4px;'>✅ LAST CALL ACTUALLY USED</div>"
+        f"<div style='font-size:16px;font-weight:700;color:#1565C0;'>{lu_val}</div>"
+        f"<div style='font-size:10px;color:#888;margin-top:4px;'>This is who really answered — not just who was scheduled</div>"
+        f"</div>",
+        unsafe_allow_html=True
+    )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.dataframe(pd.DataFrame(get_router_status()), use_container_width=True, hide_index=True)
+
+    btn_col1, btn_col2 = st.columns(2)
+    if btn_col1.button("🔄 Refresh Status", key="refresh_tab4"):
+        st.rerun()
+    if btn_col2.button("⚡ Reset All Cooldowns", key="reset_cd_tab4"):
+        n = reset_cooldowns()
+        st.success(f"✅ Cleared {n} cooldown(s) — Gemini is Ready again! Run your ETL now.")
+        st.rerun()
+
+    # ── Privacy Framework ──────────────────────────────────
     st.markdown('<div class="section-title">🔒 Privacy Framework</div>', unsafe_allow_html=True)
     st.markdown(f"""<div style="background:#0D1117;border:1px solid rgba(41,182,246,.3);border-radius:12px;padding:24px;margin-bottom:20px;">
         <div style="color:#29B6F6;font-family:'Space Mono',monospace;font-size:12px;letter-spacing:1.5px;margin-bottom:16px;">
-            🛡️ SESSION {SESSION_ID} — {get_active_provider()} ({get_active_model()})
+            🛡️ SESSION {SESSION_ID} — Last: {get_active_provider()} · Next: {get_next_provider()}
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
             <div style="background:#0a1628;border:1px solid rgba(41,182,246,.2);border-radius:8px;padding:14px;">
@@ -1064,10 +1162,7 @@ with tab4:
         </div>
     </div>""", unsafe_allow_html=True)
 
-    st.markdown('<div class="section-title">🤖 Live Provider Dashboard</div>', unsafe_allow_html=True)
-    st.dataframe(pd.DataFrame(get_router_status()), use_container_width=True, hide_index=True)
-    if st.button("🔄 Refresh", key="refresh_tab4"): st.rerun()
-
+    # ── Session Audit Log ──────────────────────────────────
     st.markdown('<div class="section-title">📋 Session Audit Log</div>', unsafe_allow_html=True)
     if st.session_state.history:
         adf=pd.DataFrame(st.session_state.history)
@@ -1076,6 +1171,7 @@ with tab4:
     else:
         st.info("No actions yet. Run an ETL or Jira breakdown to see audit entries.")
 
+    # ── PII Scanner Test ───────────────────────────────────
     st.markdown('<div class="section-title">🧪 PII Scanner Test</div>', unsafe_allow_html=True)
     test_in=st.text_area("Test text — check what gets redacted vs preserved", key="pii_test",
                          placeholder="Try: VERIFIED customer john@bank.com with account 12345678901234 or KYC_STATUS=ACTIVE")
