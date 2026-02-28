@@ -536,182 +536,29 @@ def build_system_prompt(dataframes: dict) -> str:
 # ═══════════════════════════════════════════════════════════
 
 PROJECT_PROMPTS = {
-    "🌐 Web Application":     "Senior Product Owner with 12+ years delivering Web Applications using Agile/Scrum. Expert in writing business-facing user stories from end-user and stakeholder perspectives.",
-    "📱 Mobile App":          "Senior Product Owner specialising in iOS/Android Mobile Application delivery. Writes stories from the mobile end-user's perspective, covering UX, performance, and offline behaviour.",
-    "📊 Data / ETL Pipeline": "Senior Product Owner for Data Engineering platforms. Writes stories from the data consumer's perspective — analysts, ops teams, and business stakeholders — not from a technical ETL perspective.",
-    "🔗 API / Integration":   "Senior Product Owner for API and Systems Integration. Writes stories from the consuming business user's or system's perspective, not the API developer's.",
-    "☁️ Cloud / Infra":       "Senior Product Owner for Cloud Infrastructure. Writes stories from the perspective of internal teams who depend on the infrastructure — DevOps, SRE, and business operations.",
-    "🔒 Security Feature":    "Senior Product Owner for Cybersecurity products. Expert in PCI-DSS, GDPR, ISO 27001. Writes stories from the compliance officer's, auditor's, and end-user's perspective.",
-    "🏦 Banking / FinTech":   "Senior Product Owner for Banking/FinTech with 15+ years experience. Expert in PCI-DSS, GDPR, FCA, RBI, SOX compliance. Writes stories from bank customers, relationship managers, compliance officers, and operations teams perspectives.",
-    "🤖 AI / ML Feature":     "Senior Product Owner for AI/ML products. Writes stories from the business user's and data scientist's perspective — focusing on model outcomes, explainability, and business value.",
-    "📋 General / Other":     "Senior Product Owner with 15+ years enterprise software delivery. Writes precise, business-value-focused user stories following SAFe and Scrum best practices.",
-}
-
-PROJECT_PERSONAS = {
-    "🌐 Web Application":     ["End User", "Admin User", "Content Manager", "Business Analyst"],
-    "📱 Mobile App":          ["Mobile User", "Field Agent", "Customer", "App Administrator"],
-    "📊 Data / ETL Pipeline": ["Data Analyst", "Business Intelligence User", "Operations Manager", "Compliance Officer"],
-    "🔗 API / Integration":   ["Business User", "Integration Architect", "Operations Team", "System Administrator"],
-    "☁️ Cloud / Infra":       ["DevOps Engineer", "SRE Team", "Development Team", "IT Operations Manager"],
-    "🔒 Security Feature":    ["Compliance Officer", "Security Analyst", "Auditor", "End User"],
-    "🏦 Banking / FinTech":   ["Bank Customer", "Relationship Manager", "Compliance Officer", "Operations Analyst", "Branch Staff"],
-    "🤖 AI / ML Feature":     ["Business Analyst", "Data Scientist", "End User", "Product Manager"],
-    "📋 General / Other":     ["Business User", "End User", "Administrator", "Manager"],
+    "🌐 Web Application":     "Senior Agile Delivery Manager specialising in Web Application delivery.",
+    "📱 Mobile App":          "Senior Agile Delivery Manager specialising in Mobile Application delivery.",
+    "📊 Data / ETL Pipeline": "Senior Agile Delivery Manager specialising in Data Engineering and ETL.",
+    "🔗 API / Integration":   "Senior Agile Delivery Manager specialising in API and Systems Integration.",
+    "☁️ Cloud / Infra":       "Senior Agile Delivery Manager specialising in Cloud Infrastructure and DevOps.",
+    "🔒 Security Feature":    "Senior Agile Delivery Manager specialising in Cybersecurity.",
+    "🏦 Banking / FinTech":   "Senior Agile Delivery Manager for Banking/FinTech with PCI-DSS, GDPR, FCA, SOX expertise.",
+    "🤖 AI / ML Feature":     "Senior Agile Delivery Manager specialising in AI and ML product delivery.",
+    "📋 General / Other":     "Senior Agile Delivery Manager with 15+ years enterprise software delivery.",
 }
 
 def build_jira_prompt(description, project_type, team_size, sprint_len, methodology):
     sanitized, pii = sanitize_prompt(description)
-    today = datetime.datetime.now().strftime("%Y-%m-%d")
-
-    personas = PROJECT_PERSONAS.get(project_type, PROJECT_PERSONAS["📋 General / Other"])
-    personas_str = ", ".join(personas)
-
-    # Industry-standard velocity: ~8 pts/dev/sprint at 70% capacity
-    velocity_per_sprint = int(team_size * 8 * 0.7)
-
-    system = f"""You are a {PROJECT_PROMPTS.get(project_type, PROJECT_PROMPTS['📋 General / Other'])}
-
-════════════════════════════════════════
-ABSOLUTE RULES — NEVER VIOLATE THESE:
-════════════════════════════════════════
-
-RULE 1 — USER STORY FORMAT (mandatory):
-Every single story MUST use EXACTLY this format:
-"As a [specific persona], I want [specific business capability], so that [measurable business benefit]"
-- Persona MUST be one of: {personas_str}
-- "I want" clause = what the user needs to DO, not what the system should DO
-- "so that" clause = MEASURABLE business benefit (revenue, time saved, risk reduced, compliance met)
-- FORBIDDEN: "As a system...", "As a developer...", "As the application..." — these are INVALID
-
-RULE 2 — SUBTASKS (exactly 5, always in this order):
-Every story MUST have these exact 5 subtasks — no more, no fewer:
-  1. "Analysis & Design"    — Requirements deep-dive, solution design, wireframes/data model, dependency mapping
-  2. "Development"          — Feature implementation per acceptance criteria and design specs
-  3. "Testing & QA"         — Unit tests, integration tests, UAT scripts, regression suite updates
-  4. "Deployment & Release" — Environment config, release notes, deploy to staging then production, smoke tests
-  5. "Documentation"        — Technical docs, user guide, Confluence page, runbook, API docs if applicable
-
-RULE 3 — ACCEPTANCE CRITERIA (Gherkin, minimum 3 per story):
-Every AC must follow strict Gherkin format:
-  "Given [specific precondition/context], When [user performs specific action], Then [system produces specific, testable outcome]"
-You MUST include:
-  - 1 Happy Path AC: normal successful flow
-  - 1 Edge Case AC: boundary condition or unusual but valid input
-  - 1 Error/Negative AC: what happens when something goes wrong
-
-RULE 4 — STORY POINTS (Fibonacci with rationale):
-Use only: 1, 2, 3, 5, 8, 13
-Include a one-sentence rationale explaining the complexity score.
-Sprint allocation MUST respect team velocity of ~{velocity_per_sprint} points per sprint.
-
-RULE 5 — OUTPUT FORMAT:
-Return ONLY valid JSON. Zero preamble. Zero markdown. Zero explanation outside the JSON.
-"""
-
-    user = f"""BUSINESS REQUIREMENT (PII-SANITISED):
+    system = f"You are a {PROJECT_PROMPTS.get(project_type, PROJECT_PROMPTS['📋 General / Other'])}"
+    user = f"""REQUIREMENT (PII-SANITISED):
 {sanitized}
 
-PROJECT CONTEXT:
-- Project Type: {project_type}
-- Team Size: {team_size} people
-- Sprint Length: {sprint_len} week(s)
-- Methodology: {methodology}
-- Team Velocity: ~{velocity_per_sprint} story points per sprint
-- Available Personas: {personas_str}
-- Date: {today}
+CONTEXT: Type={project_type}, Team={team_size}, Sprint={sprint_len}wk, Method={methodology}
 
-Return ONLY this exact JSON structure (no markdown, no preamble):
+Return ONLY valid JSON:
+{{"epic":{{"title":"","business_value":"","objective":"","estimated_sprints":3,"definition_of_done":[]}},"stories":[{{"id":"US-001","title":"","user_story":"As a [role], I want [feature], so that [benefit]","priority":"High","story_points":5,"sprint":"Sprint 1","type":"Feature","acceptance_criteria":["Given...When...Then..."],"subtasks":[{{"title":"","hours":4}}]}}],"risks":[{{"title":"","description":""}}],"dependencies":[]}}
 
-{{
-  "epic": {{
-    "title": "Business outcome-focused epic title (NOT technical)",
-    "business_value": "1-2 sentences on measurable business value this epic delivers to the organisation",
-    "objective": "SMART objective — Specific, Measurable, Achievable, Relevant, Time-bound",
-    "estimated_sprints": 3,
-    "definition_of_done": [
-      "All user stories accepted by Product Owner",
-      "End-to-end regression suite passing at 100%",
-      "Security and compliance review signed off",
-      "Performance benchmarks validated in production",
-      "User documentation and runbooks published to Confluence",
-      "Stakeholder demo completed and sign-off received"
-    ]
-  }},
-  "stories": [
-    {{
-      "id": "US-001",
-      "title": "Short, business-outcome focused title — NOT a technical task title",
-      "user_story": "As a [persona from: {personas_str}], I want [business capability], so that [measurable benefit]",
-      "priority": "High",
-      "story_points": 5,
-      "points_rationale": "Single sentence explaining why this story deserves this complexity score",
-      "sprint": "Sprint 1",
-      "type": "Feature",
-      "business_value": "One sentence on the specific business value this individual story delivers",
-      "definition_of_ready": [
-        "Acceptance criteria reviewed and approved by PO",
-        "UI/UX designs or wireframes signed off",
-        "Technical dependencies identified and resolved",
-        "Test data available in staging environment",
-        "Team has estimated and committed to story points"
-      ],
-      "acceptance_criteria": [
-        "Given [user is authenticated and on the relevant screen], When [user performs the primary action], Then [system responds with the expected successful outcome including specific details]",
-        "Given [user inputs a boundary/edge case value], When [user submits or triggers the action], Then [system handles it correctly and shows appropriate feedback]",
-        "Given [a failure condition exists e.g. network error, invalid input, unauthorized access], When [user attempts the action], Then [system shows a clear, actionable error message and does not lose user data]"
-      ],
-      "subtasks": [
-        {{"title": "Analysis & Design", "description": "Detailed requirements analysis, solution design document, wireframes review, data model changes, API contract definition, dependency and risk identification", "hours": 6, "role": "Business Analyst / Tech Lead"}},
-        {{"title": "Development", "description": "Full feature implementation following acceptance criteria, code review, unit tests written inline with development", "hours": 10, "role": "Developer"}},
-        {{"title": "Testing & QA", "description": "Test case authoring and execution (unit, integration, UAT), defect logging and fix verification, regression suite update", "hours": 5, "role": "QA Engineer"}},
-        {{"title": "Deployment & Release", "description": "Environment configuration, CI/CD pipeline update, deployment to staging, smoke testing, production release and hypercare monitoring", "hours": 2, "role": "DevOps / Developer"}},
-        {{"title": "Documentation", "description": "Technical specification, user-facing help guide, Confluence page update, runbook or operational guide if applicable", "hours": 2, "role": "Developer / BA"}}
-      ]
-    }}
-  ],
-  "risks": [
-    {{
-      "title": "Risk title",
-      "description": "Clear description of the risk and its source",
-      "likelihood": "High",
-      "impact": "High",
-      "mitigation": "Specific, actionable mitigation strategy"
-    }}
-  ],
-  "dependencies": [
-    {{
-      "story_id": "US-002",
-      "depends_on": "US-001",
-      "reason": "Why US-002 cannot start until US-001 is complete"
-    }}
-  ],
-  "sprint_plan": [
-    {{
-      "sprint": "Sprint 1",
-      "stories": ["US-001", "US-002"],
-      "total_points": 13,
-      "goal": "Deliver [specific sprint outcome] so that [team/business can achieve X]"
-    }}
-  ]
-}}
-
-QUALITY CHECKLIST — before finalising your response, verify:
-✓ Every story has "As a [persona]..." format — no exceptions
-✓ Every story has exactly 5 subtasks in the correct order
-✓ Every story has minimum 3 Gherkin ACs (happy path + edge case + error)
-✓ Sprint allocation does not exceed {velocity_per_sprint} points per sprint
-✓ Story points use only Fibonacci values: 1, 2, 3, 5, 8, 13
-✓ Titles are business-outcome focused, not technical task descriptions
-✓ Total stories: 5-8 (enough to deliver the full epic, independent and valuable)
-✓ Output is ONLY the JSON object — nothing before or after it
-
-⚠️ FINAL REMINDER: Your ENTIRE response must be a single JSON object.
-Do NOT write anything before the opening {{ brace.
-Do NOT write anything after the closing }} brace.
-Do NOT use markdown code fences (no ```json).
-Do NOT write "Here is the JSON:" or any explanation.
-START your response with {{ and END with }}."""
-
+RULES: 4-7 stories, Fibonacci points (1/2/3/5/8/13), Gherkin AC, ONLY JSON output."""
     return system, user, pii
 
 
@@ -1286,12 +1133,10 @@ with tab2:
 
     # Show velocity preview
     vel = int(team_sz * 8 * 0.7)
-    personas_preview = ", ".join(PROJECT_PERSONAS.get(proj_type, [])[:3])
     st.markdown(
         f"<div style='background:#F8F9FA;border:1px solid #E0E0E0;border-radius:6px;padding:8px 14px;font-size:12px;color:#555;margin-bottom:8px;'>"
         f"📊 <b>Team velocity:</b> ~{vel} pts/sprint &nbsp;·&nbsp; "
-        f"👥 <b>Personas:</b> {personas_preview}... &nbsp;·&nbsp; "
-        f"🏷 <b>Subtasks:</b> Analysis → Dev → Testing → Deployment → Docs"
+        f"🏷 <b>Subtasks per story:</b> Analysis → Dev → Testing → Deployment → Docs"
         f"</div>",
         unsafe_allow_html=True
     )
