@@ -3,14 +3,15 @@
 # ============================================================
 
 # Core framework
-streamlit>=1.35.0
+streamlit>=1.32.0
 pandas>=2.0.0
-numpy>=1.26.0
+numpy>=1.24.0
+litellm>=1.35.0
+google-generativeai>=0.5.0
+groq>=0.5.0
 xlsxwriter>=3.1.0
+requests>=2.31.0
 openpyxl>=3.1.0
-
-litellm>=1.40.0
-google-generativeai>=0.7.0
 
 # AI Router — one package handles all providers
 # Gemini, Groq, OpenAI, Anthropic, Mistral, Ollama
