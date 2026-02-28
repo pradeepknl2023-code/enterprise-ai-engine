@@ -852,11 +852,10 @@ with tab1:
         with cols[i % 3]:
             file_hint = ", ".join(ex["files"])
             if st.button(f"{ex['tag']}  [{ex['complexity']}]\n📎 {file_hint}", key=f"ex_{i}", use_container_width=True):
-                st.session_state["etl_prompt_val"] = ex["text"]
-                # KEY FIX: delete the text_area widget key so Streamlit re-renders
-                # with the new value= on next rerun (without this, value= is ignored)
-                if "etl_prompt" in st.session_state:
-                    del st.session_state["etl_prompt"]
+                # CORRECT FIX: write directly to the widget key in session_state
+                # Streamlit text_area with key="etl_prompt" reads from st.session_state["etl_prompt"]
+                # So setting it directly here means it shows on rerun — no value= needed
+                st.session_state["etl_prompt"] = ex["text"]
                 # Load the required sample data into session
                 c, a, t = get_sample_dfs()
                 sample_dfs = {}
@@ -880,8 +879,10 @@ with tab1:
                 st.dataframe(df.head(3), use_container_width=True)
 
     st.markdown('<div class="section-title">Transformation Description</div>', unsafe_allow_html=True)
+    # NOTE: No value= here — we write directly to st.session_state["etl_prompt"] from buttons above
+    # This is the correct Streamlit pattern for programmatically setting widget content
     etl_raw = st.text_area("Describe your data transformation in plain English",
-        value=st.session_state.get("etl_prompt_val", ""), key="etl_prompt", height=160,
+        key="etl_prompt", height=160,
         placeholder="Example: Join customers with accounts, compute total balance per customer...")
 
     if etl_raw:
