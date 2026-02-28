@@ -1,21 +1,32 @@
 """
-ai_router.py  ·  LiteLLM Multi-Provider Router  ·  v2.1
+ai_router.py  ·  LiteLLM Multi-Provider Router  ·  v2.2
 =========================================================
-FIXES in v2.1:
-  - os.environ sync handled externally (app.py does it at startup)
-  - Cleaner error classification
-  - Better logging for debugging
+ROOT CAUSE FIX in v2.2:
+  ─────────────────────────────────────────────────────
+  PROBLEM (v2.1 and earlier):
+    app.py synced st.secrets → os.environ with try/except pass.
+    On Streamlit Cloud, st.secrets may not be initialised when
+    the module first loads → exception silently swallowed →
+    os.environ["GEMINI_API_KEY"] never set → "No Key" shown.
+
+  FIX (v2.2):
+    _get_key() reads st.secrets DIRECTLY as a fallback.
+    Two-layer lookup:
+      Layer 1: os.environ   (local dev + works if sync succeeded)
+      Layer 2: st.secrets   (bulletproof for Streamlit Cloud)
+    Router no longer depends on the sync block at all.
+  ─────────────────────────────────────────────────────
 
 PROVIDER PRIORITY (auto-detected from available keys):
   Tier 1 — Gemini 2.0 Flash    (FREE · 1M TPM)   ← PRIMARY
   Tier 2 — Gemini 1.5 Flash    (FREE · 1M TPM)   ← BACKUP
-  Tier 3 — Groq Llama-3.3-70b  (FREE · 6k TPM)   ← YOUR EXISTING KEY
+  Tier 3 — Groq Llama-3.3-70b  (FREE · 6k TPM)
   Tier 4 — Groq DeepSeek-R1    (FREE · 6k TPM)
   Tier 5 — Groq Llama3-70b     (FREE · 6k TPM)
   Tier 6 — Groq Gemma2-9b      (FREE · 15k TPM)
   Tier 7 — Mistral Small       (FREE tier)
-  Tier 8 — GPT-4o-mini         (PAID · cheapest)
-  Tier 9 — GPT-4o              (PAID · best)
+  Tier 8 — GPT-4o-mini         (PAID)
+  Tier 9 — GPT-4o              (PAID)
   Tier 10 — Claude Sonnet      (PAID · best ETL)
   Tier 11 — Ollama local       (FREE · offline)
 """
@@ -28,6 +39,36 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 logger = logging.getLogger("AI_ROUTER")
+
+
+# ─────────────────────────────────────────────────────────────
+# ✅ BULLETPROOF KEY LOOKUP — Layer 1: os.environ, Layer 2: st.secrets
+# ─────────────────────────────────────────────────────────────
+def _get_key(env_key: str) -> str:
+    """
+    Read an API key from os.environ first, then st.secrets as fallback.
+    This makes the router work on Streamlit Cloud even if the secrets
+    sync block in app.py silently failed.
+    """
+    if not env_key:
+        return ""
+
+    # Layer 1 — os.environ (local dev / after successful sync)
+    val = os.environ.get(env_key, "").strip()
+    if val:
+        return val
+
+    # Layer 2 — st.secrets direct (Streamlit Cloud bulletproof fallback)
+    try:
+        import streamlit as st
+        val = str(st.secrets.get(env_key, "")).strip()
+        if val:
+            # Also write to os.environ so future calls skip Layer 2
+            os.environ[env_key] = val
+            logger.info(f"[ROUTER] Key {env_key} loaded from st.secrets")
+        return val
+    except Exception:
+        return ""
 
 
 # ─────────────────────────────────────────────────────────────
@@ -166,7 +207,7 @@ def _st(model: str) -> _ModelStatus:
 
 
 # ─────────────────────────────────────────────────────────────
-# AVAILABILITY CHECK
+# AVAILABILITY CHECK — uses _get_key() not os.environ directly
 # ─────────────────────────────────────────────────────────────
 def _is_available(cfg: ModelConfig) -> bool:
     s = _st(cfg.model)
@@ -174,10 +215,10 @@ def _is_available(cfg: ModelConfig) -> bool:
         return False
     if time.time() < s.rate_limited_until:
         return False
-    # Key check — reads from os.environ (synced from st.secrets in app.py)
-    if cfg.env_key and not os.environ.get(cfg.env_key, "").strip():
+    # ✅ Uses bulletproof _get_key() — reads st.secrets if os.environ empty
+    if cfg.env_key and not _get_key(cfg.env_key):
         return False
-    if "ollama" in cfg.model and not os.environ.get("OLLAMA_ENABLED", "").strip():
+    if "ollama" in cfg.model and not _get_key("OLLAMA_ENABLED"):
         return False
     return True
 
@@ -254,7 +295,10 @@ def call_ai(
         logger.error("[ROUTER] No providers available.")
         return RATE_LIMIT_SENTINEL
 
+    # Sort: highest quality first → lowest cost first (stable = preserves list order for ties)
     candidates.sort(key=lambda c: (-c.quality, c.cost_per_1k))
+
+    logger.info(f"[ROUTER] Priority order: {[c.provider for c in candidates]}")
 
     for cfg in candidates:
         for attempt in range(2):
@@ -262,7 +306,8 @@ def call_ai(
                 logger.info(f"[ROUTER] → {cfg.provider} (attempt {attempt+1})")
                 kwargs = {}
                 if cfg.env_key:
-                    kwargs["api_key"] = os.environ.get(cfg.env_key, "")
+                    # ✅ Use _get_key() — bulletproof st.secrets fallback
+                    kwargs["api_key"] = _get_key(cfg.env_key)
 
                 resp = litellm.completion(
                     model=cfg.model,
@@ -314,14 +359,14 @@ def call_ai_compat(
 
 
 # ─────────────────────────────────────────────────────────────
-# UI HELPERS
+# UI HELPERS — uses _get_key() so status reflects reality
 # ─────────────────────────────────────────────────────────────
 def get_router_status() -> list[dict]:
     rows = []
     for cfg in ALL_MODELS:
-        has_key = bool(os.environ.get(cfg.env_key, "").strip()) if cfg.env_key else True
         is_local = "ollama" in cfg.model
-        s = _st(cfg.model)
+        has_key  = bool(_get_key(cfg.env_key)) if cfg.env_key else True
+        s   = _st(cfg.model)
         now = time.time()
 
         if s.auth_failed:
@@ -336,14 +381,14 @@ def get_router_status() -> list[dict]:
             status = "🟢 Ready"
 
         rows.append({
-            "Provider":  cfg.provider,
-            "Model":     cfg.model.split("/")[-1],
-            "Cost":      "FREE" if cfg.cost_per_1k == 0 else f"${cfg.cost_per_1k:.4f}/1k",
-            "TPM":       f"{cfg.tpm:,}",
-            "Quality":   "★" * cfg.quality + "☆" * (5 - cfg.quality),
-            "Status":    status,
-            "Calls":     s.total_calls,
-            "Tokens":    f"{s.total_tokens:,}",
+            "Provider": cfg.provider,
+            "Model":    cfg.model.split("/")[-1],
+            "Cost":     "FREE" if cfg.cost_per_1k == 0 else f"${cfg.cost_per_1k:.4f}/1k",
+            "TPM":      f"{cfg.tpm:,}",
+            "Quality":  "★" * cfg.quality + "☆" * (5 - cfg.quality),
+            "Status":   status,
+            "Calls":    s.total_calls,
+            "Tokens":   f"{s.total_tokens:,}",
         })
     return rows
 
