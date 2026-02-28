@@ -1,15 +1,22 @@
 """
-Enterprise AI ETL Platform  ·  v7.0
+Enterprise AI ETL Platform  ·  v8.0
 =====================================
-FIXES & NEW FEATURES in v7.0:
-  ✅ FIX 1: Example prompts now load REAL sample data (transactions/customers/accounts)
-             — Click any example to auto-load matching CSV data + prompt
-  ✅ FIX 2: Example prompts use embedded sample data so they work WITHOUT file upload
-  ✅ NEW 3:  AI Jira Breakdown — PO can EDIT every field inline, then export to Jira
-             via Jira REST API with one click button
-  ✅ NEW 4:  Login page with session auth — new user requests come to admin email
-  ✅ NEW 5:  Admin approval panel — see pending users, approve/reject
-  ✅ Retained v6.4: Reset All Cooldowns, Next/Last provider indicators
+FIXES & NEW FEATURES in v8.0:
+  ✅ UPGRADED: Jira Breakdown — Industry-standard PO-quality stories
+               - "As a [persona], I want..., so that..." format enforced
+               - 5 SDLC subtasks per story: Analysis, Development, Testing, Deployment, Documentation
+               - Gherkin AC: Given/When/Then (happy path + edge case + error)
+               - Persona library per project type (Bank Customer, Compliance Officer, etc.)
+               - Velocity-aware sprint planning
+               - Points rationale, Business value per story, Definition of Ready
+               - Sprint Plan array with sprint goals
+               - Enhanced risk register (likelihood, impact, mitigation)
+  ✅ UPGRADED: Model temperature 0.3 → 0.1 for deterministic JSON
+  ✅ UPGRADED: Story display cards show SDLC subtasks with roles & hours
+  ✅ Retained v7.0: Example prompts load REAL sample data
+  ✅ Retained v7.0: AI Jira Breakdown — PO can EDIT every field inline
+  ✅ Retained v7.0: Jira REST API export with subtasks
+  ✅ Retained v7.0: Login page with session auth + admin approval panel
   ✅ Retained v6.x: Bank-grade PII masking, GDE flow diagram, audit log
 """
 
@@ -85,7 +92,6 @@ def load_users():
     if os.path.exists(USERS_FILE):
         with open(USERS_FILE) as f:
             return json.load(f)
-    # Default users — admin always present
     return {
         "admin": {
             "password": ADMIN_PASSWORD,
@@ -283,7 +289,6 @@ CUST008,Divya,Reddy,VERIFIED,RETAIL,STANDARD,Ahmedabad,2023-01-18
 CUST009,Rajesh,Joshi,UNVERIFIED,RETAIL,SILVER,Jaipur,2022-12-07
 CUST010,Sneha,Menon,VERIFIED,CORPORATE,PLATINUM,Surat,2020-07-25
 """
-# 10 customers — concise sample for demo
 
 SAMPLE_ACCOUNTS_CSV = """ACCOUNT_ID,CUSTOMER_ID,ACCOUNT_TYPE,STATUS,BALANCE,OPEN_DATE,BRANCH_CODE
 ACC1001,CUST001,SAVINGS,ACTIVE,125000.50,2022-01-20,BR001
@@ -297,7 +302,6 @@ ACC1008,CUST007,SAVINGS,ACTIVE,320000.00,2022-05-05,BR007
 ACC1009,CUST008,SAVINGS,ACTIVE,95000.00,2023-01-25,BR008
 ACC1010,CUST009,SAVINGS,DORMANT,12000.50,2022-12-10,BR009
 """
-# 10 accounts — 1 per customer (CUST006 has 2 to demo multi-account joins)
 
 SAMPLE_TRANSACTIONS_CSV = """TRANSACTION_ID,ACCOUNT_ID,CUSTOMER_ID,TRANSACTION_DATE,AMOUNT,TRANSACTION_TYPE,CHANNEL,STATUS,DESCRIPTION
 TXN10001,ACC1001,CUST001,2024-01-05,15000.00,DEBIT,ONLINE,COMPLETED,Online Shopping
@@ -311,7 +315,6 @@ TXN10008,ACC1009,CUST008,2024-01-25,5000.00,CREDIT,ONLINE,COMPLETED,Refund
 TXN10009,ACC1010,CUST009,2024-02-02,300000.00,DEBIT,RTGS,COMPLETED,Property Tax
 TXN10010,ACC1001,CUST001,2024-02-05,25000.00,DEBIT,ONLINE,COMPLETED,Insurance Premium
 """
-# 10 transactions — covers all channels (ONLINE/NEFT/ATM/RTGS/UPI) and both DEBIT/CREDIT
 
 def get_sample_dfs():
     customers = pd.read_csv(StringIO(SAMPLE_CUSTOMERS_CSV))
@@ -320,7 +323,7 @@ def get_sample_dfs():
     return customers, accounts, transactions
 
 # ═══════════════════════════════════════════════════════════
-# EXAMPLE PROMPTS — now with embedded data loading
+# EXAMPLE PROMPTS
 # ═══════════════════════════════════════════════════════════
 EXAMPLES = [
     {
@@ -379,7 +382,6 @@ BUSINESS_WHITELIST = {
 # ═══════════════════════════════════════════════════════════
 # PRIVACY ENGINE
 # ═══════════════════════════════════════════════════════════
-# Patterns applied to DATA VALUES in columns (full set - more aggressive)
 SENSITIVE_PATTERNS = {
     "account_number": r'\b\d{8,17}\b',
     "sort_code":      r'\b\d{2}-\d{2}-\d{2}\b',
@@ -398,9 +400,6 @@ SENSITIVE_PATTERNS = {
     "passport":       r'\b[A-Z]{1,2}\d{6,9}\b',
 }
 
-# Patterns safe for PROMPT TEXT — excludes SWIFT/passport which match common English words
-# SWIFT r'[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}' matches: EMPLOYEE, CUSTOMER, VERIFIED, TRANSFER etc.
-# passport r'[A-Z]{1,2}\d{6,9}' matches: column references like A1234567
 PROMPT_SAFE_PATTERNS = {
     "account_number": r'\b\d{8,17}\b',
     "sort_code":      r'\b\d{2}-\d{2}-\d{2}\b',
@@ -458,7 +457,6 @@ def mask_dataframe(df: pd.DataFrame):
     return masked, masked_cols, total
 
 def scan_pii(text: str) -> list:
-    """Scan prompt text — uses PROMPT_SAFE_PATTERNS to avoid false positives on common words."""
     found = []
     for name, pat in PROMPT_SAFE_PATTERNS.items():
         matches = re.findall(pat, text, re.IGNORECASE)
@@ -470,7 +468,6 @@ def scan_pii(text: str) -> list:
     return list(dict.fromkeys(found))
 
 def sanitize_prompt(prompt: str):
-    """Sanitize prompt text — uses PROMPT_SAFE_PATTERNS only (excludes SWIFT/passport)."""
     found = scan_pii(prompt)
     sanitized = prompt
     for pname, pat in PROMPT_SAFE_PATTERNS.items():
@@ -535,32 +532,179 @@ def build_system_prompt(dataframes: dict) -> str:
 
 
 # ═══════════════════════════════════════════════════════════
-# JIRA HELPERS
+# JIRA HELPERS — v8.0 INDUSTRY-STANDARD PO PROMPT ENGINE
 # ═══════════════════════════════════════════════════════════
+
 PROJECT_PROMPTS = {
-    "🌐 Web Application":     "Senior Agile Delivery Manager specialising in Web Application delivery.",
-    "📱 Mobile App":          "Senior Agile Delivery Manager specialising in Mobile Application delivery.",
-    "📊 Data / ETL Pipeline": "Senior Agile Delivery Manager specialising in Data Engineering and ETL.",
-    "🔗 API / Integration":   "Senior Agile Delivery Manager specialising in API and Systems Integration.",
-    "☁️ Cloud / Infra":       "Senior Agile Delivery Manager specialising in Cloud Infrastructure and DevOps.",
-    "🔒 Security Feature":    "Senior Agile Delivery Manager specialising in Cybersecurity.",
-    "🏦 Banking / FinTech":   "Senior Agile Delivery Manager for Banking/FinTech with PCI-DSS, GDPR, FCA, SOX expertise.",
-    "🤖 AI / ML Feature":     "Senior Agile Delivery Manager specialising in AI and ML product delivery.",
-    "📋 General / Other":     "Senior Agile Delivery Manager with 15+ years enterprise software delivery.",
+    "🌐 Web Application":     "Senior Product Owner with 12+ years delivering Web Applications using Agile/Scrum. Expert in writing business-facing user stories from end-user and stakeholder perspectives.",
+    "📱 Mobile App":          "Senior Product Owner specialising in iOS/Android Mobile Application delivery. Writes stories from the mobile end-user's perspective, covering UX, performance, and offline behaviour.",
+    "📊 Data / ETL Pipeline": "Senior Product Owner for Data Engineering platforms. Writes stories from the data consumer's perspective — analysts, ops teams, and business stakeholders — not from a technical ETL perspective.",
+    "🔗 API / Integration":   "Senior Product Owner for API and Systems Integration. Writes stories from the consuming business user's or system's perspective, not the API developer's.",
+    "☁️ Cloud / Infra":       "Senior Product Owner for Cloud Infrastructure. Writes stories from the perspective of internal teams who depend on the infrastructure — DevOps, SRE, and business operations.",
+    "🔒 Security Feature":    "Senior Product Owner for Cybersecurity products. Expert in PCI-DSS, GDPR, ISO 27001. Writes stories from the compliance officer's, auditor's, and end-user's perspective.",
+    "🏦 Banking / FinTech":   "Senior Product Owner for Banking/FinTech with 15+ years experience. Expert in PCI-DSS, GDPR, FCA, RBI, SOX compliance. Writes stories from bank customers, relationship managers, compliance officers, and operations teams perspectives.",
+    "🤖 AI / ML Feature":     "Senior Product Owner for AI/ML products. Writes stories from the business user's and data scientist's perspective — focusing on model outcomes, explainability, and business value.",
+    "📋 General / Other":     "Senior Product Owner with 15+ years enterprise software delivery. Writes precise, business-value-focused user stories following SAFe and Scrum best practices.",
+}
+
+PROJECT_PERSONAS = {
+    "🌐 Web Application":     ["End User", "Admin User", "Content Manager", "Business Analyst"],
+    "📱 Mobile App":          ["Mobile User", "Field Agent", "Customer", "App Administrator"],
+    "📊 Data / ETL Pipeline": ["Data Analyst", "Business Intelligence User", "Operations Manager", "Compliance Officer"],
+    "🔗 API / Integration":   ["Business User", "Integration Architect", "Operations Team", "System Administrator"],
+    "☁️ Cloud / Infra":       ["DevOps Engineer", "SRE Team", "Development Team", "IT Operations Manager"],
+    "🔒 Security Feature":    ["Compliance Officer", "Security Analyst", "Auditor", "End User"],
+    "🏦 Banking / FinTech":   ["Bank Customer", "Relationship Manager", "Compliance Officer", "Operations Analyst", "Branch Staff"],
+    "🤖 AI / ML Feature":     ["Business Analyst", "Data Scientist", "End User", "Product Manager"],
+    "📋 General / Other":     ["Business User", "End User", "Administrator", "Manager"],
 }
 
 def build_jira_prompt(description, project_type, team_size, sprint_len, methodology):
     sanitized, pii = sanitize_prompt(description)
-    system = f"You are a {PROJECT_PROMPTS.get(project_type, PROJECT_PROMPTS['📋 General / Other'])}"
-    user = f"""REQUIREMENT (PII-SANITISED):
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+
+    personas = PROJECT_PERSONAS.get(project_type, PROJECT_PERSONAS["📋 General / Other"])
+    personas_str = ", ".join(personas)
+
+    # Industry-standard velocity: ~8 pts/dev/sprint at 70% capacity
+    velocity_per_sprint = int(team_size * 8 * 0.7)
+
+    system = f"""You are a {PROJECT_PROMPTS.get(project_type, PROJECT_PROMPTS['📋 General / Other'])}
+
+════════════════════════════════════════
+ABSOLUTE RULES — NEVER VIOLATE THESE:
+════════════════════════════════════════
+
+RULE 1 — USER STORY FORMAT (mandatory):
+Every single story MUST use EXACTLY this format:
+"As a [specific persona], I want [specific business capability], so that [measurable business benefit]"
+- Persona MUST be one of: {personas_str}
+- "I want" clause = what the user needs to DO, not what the system should DO
+- "so that" clause = MEASURABLE business benefit (revenue, time saved, risk reduced, compliance met)
+- FORBIDDEN: "As a system...", "As a developer...", "As the application..." — these are INVALID
+
+RULE 2 — SUBTASKS (exactly 5, always in this order):
+Every story MUST have these exact 5 subtasks — no more, no fewer:
+  1. "Analysis & Design"    — Requirements deep-dive, solution design, wireframes/data model, dependency mapping
+  2. "Development"          — Feature implementation per acceptance criteria and design specs
+  3. "Testing & QA"         — Unit tests, integration tests, UAT scripts, regression suite updates
+  4. "Deployment & Release" — Environment config, release notes, deploy to staging then production, smoke tests
+  5. "Documentation"        — Technical docs, user guide, Confluence page, runbook, API docs if applicable
+
+RULE 3 — ACCEPTANCE CRITERIA (Gherkin, minimum 3 per story):
+Every AC must follow strict Gherkin format:
+  "Given [specific precondition/context], When [user performs specific action], Then [system produces specific, testable outcome]"
+You MUST include:
+  - 1 Happy Path AC: normal successful flow
+  - 1 Edge Case AC: boundary condition or unusual but valid input
+  - 1 Error/Negative AC: what happens when something goes wrong
+
+RULE 4 — STORY POINTS (Fibonacci with rationale):
+Use only: 1, 2, 3, 5, 8, 13
+Include a one-sentence rationale explaining the complexity score.
+Sprint allocation MUST respect team velocity of ~{velocity_per_sprint} points per sprint.
+
+RULE 5 — OUTPUT FORMAT:
+Return ONLY valid JSON. Zero preamble. Zero markdown. Zero explanation outside the JSON.
+"""
+
+    user = f"""BUSINESS REQUIREMENT (PII-SANITISED):
 {sanitized}
 
-CONTEXT: Type={project_type}, Team={team_size}, Sprint={sprint_len}wk, Method={methodology}
+PROJECT CONTEXT:
+- Project Type: {project_type}
+- Team Size: {team_size} people
+- Sprint Length: {sprint_len} week(s)
+- Methodology: {methodology}
+- Team Velocity: ~{velocity_per_sprint} story points per sprint
+- Available Personas: {personas_str}
+- Date: {today}
 
-Return ONLY valid JSON:
-{{"epic":{{"title":"","business_value":"","objective":"","estimated_sprints":3,"definition_of_done":[]}},"stories":[{{"id":"US-001","title":"","user_story":"As a [role], I want [feature], so that [benefit]","priority":"High","story_points":5,"sprint":"Sprint 1","type":"Feature","acceptance_criteria":["Given...When...Then..."],"subtasks":[{{"title":"","hours":4}}]}}],"risks":[{{"title":"","description":""}}],"dependencies":[]}}
+Return ONLY this exact JSON structure (no markdown, no preamble):
 
-RULES: 4-7 stories, Fibonacci points (1/2/3/5/8/13), Gherkin AC, ONLY JSON output."""
+{{
+  "epic": {{
+    "title": "Business outcome-focused epic title (NOT technical)",
+    "business_value": "1-2 sentences on measurable business value this epic delivers to the organisation",
+    "objective": "SMART objective — Specific, Measurable, Achievable, Relevant, Time-bound",
+    "estimated_sprints": 3,
+    "definition_of_done": [
+      "All user stories accepted by Product Owner",
+      "End-to-end regression suite passing at 100%",
+      "Security and compliance review signed off",
+      "Performance benchmarks validated in production",
+      "User documentation and runbooks published to Confluence",
+      "Stakeholder demo completed and sign-off received"
+    ]
+  }},
+  "stories": [
+    {{
+      "id": "US-001",
+      "title": "Short, business-outcome focused title — NOT a technical task title",
+      "user_story": "As a [persona from: {personas_str}], I want [business capability], so that [measurable benefit]",
+      "priority": "High",
+      "story_points": 5,
+      "points_rationale": "Single sentence explaining why this story deserves this complexity score",
+      "sprint": "Sprint 1",
+      "type": "Feature",
+      "business_value": "One sentence on the specific business value this individual story delivers",
+      "definition_of_ready": [
+        "Acceptance criteria reviewed and approved by PO",
+        "UI/UX designs or wireframes signed off",
+        "Technical dependencies identified and resolved",
+        "Test data available in staging environment",
+        "Team has estimated and committed to story points"
+      ],
+      "acceptance_criteria": [
+        "Given [user is authenticated and on the relevant screen], When [user performs the primary action], Then [system responds with the expected successful outcome including specific details]",
+        "Given [user inputs a boundary/edge case value], When [user submits or triggers the action], Then [system handles it correctly and shows appropriate feedback]",
+        "Given [a failure condition exists e.g. network error, invalid input, unauthorized access], When [user attempts the action], Then [system shows a clear, actionable error message and does not lose user data]"
+      ],
+      "subtasks": [
+        {{"title": "Analysis & Design", "description": "Detailed requirements analysis, solution design document, wireframes review, data model changes, API contract definition, dependency and risk identification", "hours": 6, "role": "Business Analyst / Tech Lead"}},
+        {{"title": "Development", "description": "Full feature implementation following acceptance criteria, code review, unit tests written inline with development", "hours": 10, "role": "Developer"}},
+        {{"title": "Testing & QA", "description": "Test case authoring and execution (unit, integration, UAT), defect logging and fix verification, regression suite update", "hours": 5, "role": "QA Engineer"}},
+        {{"title": "Deployment & Release", "description": "Environment configuration, CI/CD pipeline update, deployment to staging, smoke testing, production release and hypercare monitoring", "hours": 2, "role": "DevOps / Developer"}},
+        {{"title": "Documentation", "description": "Technical specification, user-facing help guide, Confluence page update, runbook or operational guide if applicable", "hours": 2, "role": "Developer / BA"}}
+      ]
+    }}
+  ],
+  "risks": [
+    {{
+      "title": "Risk title",
+      "description": "Clear description of the risk and its source",
+      "likelihood": "High",
+      "impact": "High",
+      "mitigation": "Specific, actionable mitigation strategy"
+    }}
+  ],
+  "dependencies": [
+    {{
+      "story_id": "US-002",
+      "depends_on": "US-001",
+      "reason": "Why US-002 cannot start until US-001 is complete"
+    }}
+  ],
+  "sprint_plan": [
+    {{
+      "sprint": "Sprint 1",
+      "stories": ["US-001", "US-002"],
+      "total_points": 13,
+      "goal": "Deliver [specific sprint outcome] so that [team/business can achieve X]"
+    }}
+  ]
+}}
+
+QUALITY CHECKLIST — before finalising your response, verify:
+✓ Every story has "As a [persona]..." format — no exceptions
+✓ Every story has exactly 5 subtasks in the correct order
+✓ Every story has minimum 3 Gherkin ACs (happy path + edge case + error)
+✓ Sprint allocation does not exceed {velocity_per_sprint} points per sprint
+✓ Story points use only Fibonacci values: 1, 2, 3, 5, 8, 13
+✓ Titles are business-outcome focused, not technical task descriptions
+✓ Total stories: 5-8 (enough to deliver the full epic, independent and valuable)
+✓ Output is ONLY the JSON object — nothing before or after it"""
+
     return system, user, pii
 
 
@@ -569,11 +713,9 @@ RULES: 4-7 stories, Fibonacci points (1/2/3/5/8/13), Gherkin AC, ONLY JSON outpu
 # ═══════════════════════════════════════════════════════════
 
 def _jira_post(url, payload, auth, headers):
-    """Helper — POST to Jira, auto-retry Story/Task issuetype."""
     resp = requests.post(url, json=payload, headers=headers, auth=auth, timeout=15)
     if resp.status_code in [200, 201]:
         return True, resp.json().get("key", "?")
-    # If issuetype rejected, flip Task<->Story and retry once
     if resp.status_code == 400 and "issuetype" in resp.text.lower():
         current = payload["fields"]["issuetype"]["name"]
         payload["fields"]["issuetype"]["name"] = "Story" if current == "Task" else "Task"
@@ -585,7 +727,6 @@ def _jira_post(url, payload, auth, headers):
 
 
 def _build_adf(story, epic_title):
-    """Build Atlassian Document Format description with User Story + AC + Subtask list."""
     ac_items = []
     for ac in story.get("acceptance_criteria", []):
         ac_items.append({
@@ -595,49 +736,72 @@ def _build_adf(story, epic_title):
 
     subtask_items = []
     for st_item in story.get("subtasks", []):
-        label = "{} (~{}h)".format(st_item.get("title", ""), st_item.get("hours", "?"))
+        label = "{} (~{}h) — {}".format(
+            st_item.get("title", ""),
+            st_item.get("hours", "?"),
+            st_item.get("role", "")
+        )
         subtask_items.append({
             "type": "listItem",
             "content": [{"type": "paragraph", "content": [{"type": "text", "text": label}]}]
         })
 
+    dor_items = []
+    for dor in story.get("definition_of_ready", []):
+        dor_items.append({
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": str(dor)}]}]
+        })
+
     content_blocks = [
-        # User Story italic
         {"type": "paragraph", "content": [
             {"type": "text", "text": story.get("user_story", ""), "marks": [{"type": "em"}]}
         ]},
-        # Meta line
         {"type": "paragraph", "content": [{"type": "text", "text":
-            "Sprint: {} | Points: {} | Priority: {} | Epic: {}".format(
+            "Sprint: {} | Points: {} | Priority: {} | Epic: {} | Type: {}".format(
                 story.get("sprint",""), story.get("story_points",""),
-                story.get("priority",""), epic_title),
+                story.get("priority",""), epic_title, story.get("type","")),
             "marks": [{"type": "strong"}]
         }]},
-        # Acceptance Criteria heading + list
-        {"type": "heading", "attrs": {"level": 3}, "content": [
-            {"type": "text", "text": "Acceptance Criteria"}
-        ]},
     ]
+
+    bv = story.get("business_value", "")
+    if bv:
+        content_blocks.append({"type": "paragraph", "content": [
+            {"type": "text", "text": "💡 Business Value: " + bv}
+        ]})
+
+    pr = story.get("points_rationale", "")
+    if pr:
+        content_blocks.append({"type": "paragraph", "content": [
+            {"type": "text", "text": "📊 Points Rationale: " + pr}
+        ]})
+
+    content_blocks.append({
+        "type": "heading", "attrs": {"level": 3},
+        "content": [{"type": "text", "text": "✅ Acceptance Criteria (Gherkin)"}]
+    })
     if ac_items:
         content_blocks.append({"type": "bulletList", "content": ac_items})
-    else:
-        content_blocks.append({"type": "paragraph", "content": [{"type": "text", "text": "No AC defined."}]})
 
-    # Subtasks summary in description
+    if dor_items:
+        content_blocks.append({
+            "type": "heading", "attrs": {"level": 3},
+            "content": [{"type": "text", "text": "📋 Definition of Ready"}]
+        })
+        content_blocks.append({"type": "bulletList", "content": dor_items})
+
     if subtask_items:
-        content_blocks.append({"type": "heading", "attrs": {"level": 3}, "content": [
-            {"type": "text", "text": "Subtasks (also created as child issues)"}
-        ]})
+        content_blocks.append({
+            "type": "heading", "attrs": {"level": 3},
+            "content": [{"type": "text", "text": "🔧 SDLC Subtasks (also created as child issues)"}]
+        })
         content_blocks.append({"type": "bulletList", "content": subtask_items})
 
     return {"type": "doc", "version": 1, "content": content_blocks}
 
 
 def push_story_to_jira(story, epic_title, jira_url, jira_email, jira_token, jira_project_key):
-    """
-    Push one story + all its subtasks to Jira Cloud.
-    Returns: (ok: bool, message: str, subtask_keys: list)
-    """
     base_url = jira_url.rstrip("/")
     issue_url = "{}/rest/api/3/issue".format(base_url)
     headers = {"Content-Type": "application/json"}
@@ -646,16 +810,14 @@ def push_story_to_jira(story, epic_title, jira_url, jira_email, jira_token, jira
     priority_map = {"critical": "Highest", "high": "High", "medium": "Medium", "low": "Low"}
     priority = priority_map.get(story.get("priority", "medium").lower(), "Medium")
 
-    # Clean summary — plain hyphen, strip special chars that break Jira
     raw_summary = "{} - {}".format(story.get("id", "US"), story.get("title", ""))
-    summary = raw_summary.encode("ascii", "ignore").decode("ascii")  # strip non-ASCII
+    summary = raw_summary.encode("ascii", "ignore").decode("ascii")
 
     labels = [
         story.get("type", "Feature").replace(" ", "-"),
         story.get("sprint", "Sprint-1").replace(" ", "-"),
     ]
 
-    # ── STEP 1: Create parent story/task ─────────────────
     parent_payload = {
         "fields": {
             "project": {"key": jira_project_key},
@@ -671,12 +833,13 @@ def push_story_to_jira(story, epic_title, jira_url, jira_email, jira_token, jira
     if not ok:
         return False, parent_key, []
 
-    # ── STEP 2: Create subtasks as child issues ───────────
     subtask_keys = []
     subtasks = story.get("subtasks", [])
     for i, st_item in enumerate(subtasks, 1):
         st_title = st_item.get("title", "Subtask {}".format(i))
         st_hours = st_item.get("hours", 0)
+        st_role  = st_item.get("role", "")
+        st_desc_text = st_item.get("description", "")
         st_summary = "{}.{} - {} (~{}h)".format(
             story.get("id", "US"), i, st_title, st_hours
         ).encode("ascii", "ignore").decode("ascii")
@@ -685,13 +848,13 @@ def push_story_to_jira(story, epic_title, jira_url, jira_email, jira_token, jira
             "type": "doc", "version": 1,
             "content": [
                 {"type": "paragraph", "content": [{"type": "text", "text":
-                    "Subtask of: {} | Estimated: {}h | Parent: {}".format(
-                        parent_key, st_hours, summary)
-                }]}
+                    "Subtask of: {} | Estimated: {}h | Role: {} | Parent: {}".format(
+                        parent_key, st_hours, st_role, summary)
+                }]},
+                {"type": "paragraph", "content": [{"type": "text", "text": st_desc_text}]},
             ]
         }
 
-        # Try Subtask issuetype first, fall back to Task
         st_payload = {
             "fields": {
                 "project": {"key": jira_project_key},
@@ -699,12 +862,11 @@ def push_story_to_jira(story, epic_title, jira_url, jira_email, jira_token, jira
                 "description": st_description,
                 "issuetype": {"name": "Subtask"},
                 "priority": {"name": priority},
-                "parent": {"key": parent_key},   # link to parent
+                "parent": {"key": parent_key},
             }
         }
         st_ok, st_key = _jira_post(issue_url, st_payload, auth, headers)
         if not st_ok:
-            # Subtask issuetype not available — try "Task" with parent link
             st_payload["fields"]["issuetype"] = {"name": "Task"}
             st_ok, st_key = _jira_post(issue_url, st_payload, auth, headers)
         if st_ok:
@@ -714,7 +876,7 @@ def push_story_to_jira(story, epic_title, jira_url, jira_email, jira_token, jira
 
 
 # ═══════════════════════════════════════════════════════════
-# CSS
+# CSS — Complete styles
 # ═══════════════════════════════════════════════════════════
 st.markdown("""
 <style>
@@ -761,7 +923,16 @@ st.markdown("""
 .badge-type{background:#E3F2FD;color:#1565C0;border:1px solid #90CAF9;padding:2px 8px;border-radius:10px;font-size:11px;}
 .ac-section{margin-top:12px;}
 .ac-title{font-size:11px;font-weight:700;color:#B31B1B;text-transform:uppercase;margin-bottom:6px;}
-.ac-item{font-size:12px;color:#444;padding:4px 0 4px 12px;border-left:2px solid #FFC72C;margin:4px 0;line-height:1.5;}
+.ac-item{font-size:12px;color:#444;padding:5px 0 5px 12px;border-left:2px solid #FFC72C;margin:4px 0;line-height:1.6;}
+.subtask-row{display:flex;gap:8px;align-items:flex-start;padding:6px 0;border-bottom:1px solid #F5F5F5;}
+.subtask-row:last-child{border-bottom:none;}
+.subtask-icon{font-size:15px;min-width:20px;margin-top:1px;}
+.subtask-content{flex:1;}
+.subtask-title{font-size:12px;font-weight:600;color:#1a1a1a;}
+.subtask-meta{font-size:11px;color:#888;margin-top:1px;}
+.subtask-desc{font-size:11px;color:#555;margin-top:3px;line-height:1.5;}
+.sdlc-section{margin-top:14px;background:#FAFAFA;border:1px solid #F0F0F0;border-radius:6px;padding:12px 14px;}
+.sdlc-title{font-size:11px;font-weight:700;color:#B31B1B;text-transform:uppercase;margin-bottom:8px;letter-spacing:.5px;}
 .jira-edit-panel{background:#F8F9FA;border:2px dashed #B31B1B;border-radius:10px;padding:20px;margin:16px 0;}
 .jira-export-panel{background:linear-gradient(135deg,#0a2a0a,#0d1f0d);border:2px solid rgba(105,240,174,.4);border-radius:12px;padding:20px;margin:16px 0;}
 .decrypt-panel{background:linear-gradient(135deg,#0a2a0a,#0d1f0d);border:2px solid rgba(105,240,174,.4);border-radius:12px;padding:20px 24px;margin:16px 0;}
@@ -774,6 +945,11 @@ st.markdown("""
 .author{font-family:'Rajdhani',sans-serif;font-size:15px;font-weight:700;color:#B31B1B;}
 .dot{width:6px;height:6px;background:#FFC72C;border-radius:50%;display:inline-block;}
 .sample-data-badge{background:#E8F5E9;border:1px solid #A5D6A7;color:#1B5E20;padding:4px 10px;border-radius:8px;font-size:11px;font-weight:600;display:inline-block;margin-left:8px;}
+.user-story-block{font-size:13px;color:#1565C0;font-style:italic;background:#F0F7FF;border-left:3px solid #1565C0;padding:8px 12px;border-radius:0 6px 6px 0;margin:8px 0;line-height:1.6;}
+.biz-value-block{font-size:12px;color:#2E7D32;background:#F1F8E9;border:1px solid #C8E6C9;padding:6px 10px;border-radius:6px;margin:6px 0;}
+.points-rationale-block{font-size:11px;color:#666;font-style:italic;margin-top:4px;padding:4px 0;}
+.sprint-plan-card{background:white;border:1px solid #E8E8E8;border-top:3px solid #2E7D32;border-radius:8px;padding:14px 18px;margin:8px 0;}
+.risk-card{background:white;border:1px solid #E8E8E8;border-left:4px solid #FF6F00;border-radius:8px;padding:12px 16px;margin:6px 0;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -785,7 +961,6 @@ active_prov  = get_active_provider()
 active_model = get_active_model()
 next_prov    = get_next_provider()
 
-# Logout + User info in top right
 col_header, col_logout = st.columns([5, 1])
 with col_header:
     st.markdown("""<div class="built-by">
@@ -806,7 +981,7 @@ st.markdown(f"""<div class="main-header">
         <div class="provider-pill">🤖 Last Used: {active_prov} &nbsp;·&nbsp; {active_model}</div>
         <div class="provider-pill" style="background:rgba(255,199,44,.15);border-color:rgba(255,199,44,.4);color:#FFC72C;">⏭️ Next Call: {next_prov}</div>
     </div>
-    <div style="text-align:right;"><div class="version-badge">v7.0 FULL FEATURES</div></div>
+    <div style="text-align:right;"><div class="version-badge">v8.0 INDUSTRY-GRADE</div></div>
 </div>""", unsafe_allow_html=True)
 
 st.markdown(f"""<div class="session-bar">
@@ -818,7 +993,6 @@ st.markdown(f"""<div class="session-bar">
     <div>⏱️ {datetime.datetime.now().strftime("%d %b %Y %H:%M")}</div>
 </div>""", unsafe_allow_html=True)
 
-# Tabs — admin gets extra tab
 if USER_ROLE == "admin":
     tab1, tab2, tab3, tab4, tab_admin = st.tabs([
         "⚡ AI ETL Engine", "📋 AI Jira Breakdown", "🎬 Demo & Benefits", "🔒 Privacy & Audit", "👤 Admin"
@@ -831,7 +1005,7 @@ else:
 
 
 # ───────────────────────────────────────────────────────────
-# TAB 1 — ETL ENGINE (with working example prompts)
+# TAB 1 — ETL ENGINE
 # ───────────────────────────────────────────────────────────
 with tab1:
     st.markdown("""<div style="background:#F0F7FF;border:1px solid #BBDEFB;border-left:4px solid #1E90FF;border-radius:8px;padding:12px 16px;margin-bottom:16px;">
@@ -844,7 +1018,6 @@ with tab1:
             <b>Step 5:</b> Download masked (safe) or original (requires acknowledgement + audit log).
         </div></div>""", unsafe_allow_html=True)
 
-    # ── Example Prompts — now load sample data too ──────────
     st.markdown('<div class="section-title">💡 Example Prompts <span style="font-size:12px;color:#2E7D32;font-weight:normal;">(click to load prompt + sample banking data)</span></div>', unsafe_allow_html=True)
 
     cols = st.columns(3)
@@ -852,11 +1025,7 @@ with tab1:
         with cols[i % 3]:
             file_hint = ", ".join(ex["files"])
             if st.button(f"{ex['tag']}  [{ex['complexity']}]\n📎 {file_hint}", key=f"ex_{i}", use_container_width=True):
-                # CORRECT FIX: write directly to the widget key in session_state
-                # Streamlit text_area with key="etl_prompt" reads from st.session_state["etl_prompt"]
-                # So setting it directly here means it shows on rerun — no value= needed
                 st.session_state["etl_prompt"] = ex["text"]
-                # Load the required sample data into session
                 c, a, t = get_sample_dfs()
                 sample_dfs = {}
                 df_list = []
@@ -870,7 +1039,6 @@ with tab1:
                 st.session_state["using_sample"] = True
                 st.rerun()
 
-    # Show sample data preview if loaded
     if st.session_state.get("using_sample") and st.session_state.get("sample_df_list"):
         st.markdown('<span class="sample-data-badge">✅ Sample banking data loaded — no upload needed!</span>', unsafe_allow_html=True)
         with st.expander("👁️ Preview Sample Data", expanded=False):
@@ -879,8 +1047,6 @@ with tab1:
                 st.dataframe(df.head(3), use_container_width=True)
 
     st.markdown('<div class="section-title">Transformation Description</div>', unsafe_allow_html=True)
-    # NOTE: No value= here — we write directly to st.session_state["etl_prompt"] from buttons above
-    # This is the correct Streamlit pattern for programmatically setting widget content
     etl_raw = st.text_area("Describe your data transformation in plain English",
         key="etl_prompt", height=160,
         placeholder="Example: Join customers with accounts, compute total balance per customer...")
@@ -891,7 +1057,6 @@ with tab1:
             st.markdown(f'<div class="pii-warning"><div class="pw-title">⚠️ PII Detected in Prompt: {", ".join(pii_in_prompt)}</div>'
                         f'<div style="font-size:12px;color:#555;">Auto-redacted before sending to AI.</div></div>', unsafe_allow_html=True)
 
-    # File upload (optional if sample loaded)
     if st.session_state.get("using_sample"):
         st.info("💡 Using embedded sample data. You can also upload your own CSVs below to override.")
         if st.button("🗑️ Clear Sample Data", key="clear_sample"):
@@ -926,7 +1091,6 @@ with tab1:
                     else:
                         st.markdown("<span style='color:#2E7D32;font-size:12px;'>✓ No sensitive columns</span>", unsafe_allow_html=True)
 
-    # Provider Status
     with st.expander("🤖 AI Provider Status", expanded=False):
         np_val = get_next_provider()
         lu_val = get_active_provider()
@@ -964,7 +1128,6 @@ with tab1:
             st.warning("Please enter a transformation description.")
             st.stop()
 
-        # Determine data source — sample or uploaded
         if st.session_state.get("using_sample") and st.session_state.get("sample_dfs"):
             dfs_original = st.session_state["sample_dfs"].copy()
             fnames = [f"{k} (sample)" for k in dfs_original.keys()]
@@ -1092,12 +1255,19 @@ with tab1:
 
 
 # ───────────────────────────────────────────────────────────
-# TAB 2 — JIRA BREAKDOWN + PO EDIT + JIRA EXPORT
+# TAB 2 — JIRA BREAKDOWN v8.0
 # ───────────────────────────────────────────────────────────
 with tab2:
-    st.markdown("""<div style="background:#F0F7FF;border:1px solid #BBDEFB;border-left:4px solid #1E90FF;border-radius:8px;padding:12px 16px;margin-bottom:16px;">
-        <div style="font-size:12px;font-weight:700;color:#1565C0;margin-bottom:4px;">🔒 PRIVACY IN JIRA BREAKDOWN</div>
-        <div style="font-size:12px;color:#333;">PII auto-redacted. Business values preserved. You can edit all fields before export.</div>
+    st.markdown("""<div style="background:#F0F7FF;border:1px solid #BBDEFB;border-left:4px solid #1E90FF;border-radius:8px;padding:14px 18px;margin-bottom:16px;">
+        <div style="font-size:13px;font-weight:700;color:#1565C0;margin-bottom:8px;">📋 AI JIRA BREAKDOWN — v8.0 INDUSTRY-STANDARD</div>
+        <div style="font-size:12px;color:#333;line-height:2.0;">
+            ✅ <b>User stories:</b> "As a [Business Persona], I want [capability], so that [measurable benefit]"<br>
+            ✅ <b>SDLC subtasks:</b> Analysis &amp; Design → Development → Testing &amp; QA → Deployment &amp; Release → Documentation<br>
+            ✅ <b>Gherkin AC:</b> Given/When/Then — Happy Path + Edge Case + Error Scenario per story<br>
+            ✅ <b>Velocity-aware sprints:</b> Auto-calculated from team size &amp; sprint length<br>
+            ✅ <b>PII protection:</b> Requirement sanitised before sending to AI<br>
+            ✅ <b>Edit &amp; Export:</b> PO can edit every field inline, then push to Jira Cloud via REST API
+        </div>
     </div>""", unsafe_allow_html=True)
 
     st.markdown('<div class="section-title">Project Configuration</div>', unsafe_allow_html=True)
@@ -1107,32 +1277,54 @@ with tab2:
     sprint_l = cb.selectbox("Sprint (weeks)", [1, 2, 3], index=1, key="sprint_l")
     method = cc.selectbox("Methodology", ["Scrum", "Kanban", "SAFe", "Scrumban"], key="method")
 
+    # Show velocity preview
+    vel = int(team_sz * 8 * 0.7)
+    personas_preview = ", ".join(PROJECT_PERSONAS.get(proj_type, [])[:3])
+    st.markdown(
+        f"<div style='background:#F8F9FA;border:1px solid #E0E0E0;border-radius:6px;padding:8px 14px;font-size:12px;color:#555;margin-bottom:8px;'>"
+        f"📊 <b>Team velocity:</b> ~{vel} pts/sprint &nbsp;·&nbsp; "
+        f"👥 <b>Personas:</b> {personas_preview}... &nbsp;·&nbsp; "
+        f"🏷 <b>Subtasks:</b> Analysis → Dev → Testing → Deployment → Docs"
+        f"</div>",
+        unsafe_allow_html=True
+    )
+
     st.markdown('<div class="section-title">Business Requirement</div>', unsafe_allow_html=True)
-    jira_raw = st.text_area("Describe the feature, initiative, or product requirement", key="jira_prompt", height=160,
-                            placeholder="Example: Build a customer portal for viewing account statements, raising disputes...")
+    jira_raw = st.text_area(
+        "Describe the feature, initiative, or product requirement",
+        key="jira_prompt", height=160,
+        placeholder="Example: Build a customer portal allowing bank customers to view statements, download PDFs, raise disputes, and set up standing orders — all via a mobile-responsive web interface with full audit trail for compliance..."
+    )
 
     if jira_raw:
         pj = scan_pii(jira_raw)
         if pj:
             st.markdown(f'<div class="pii-warning"><div class="pw-title">⚠️ PII in Requirement: {", ".join(pj)}</div>'
-                        f'<div style="font-size:12px;color:#555;">Auto-redacted.</div></div>', unsafe_allow_html=True)
+                        f'<div style="font-size:12px;color:#555;">Auto-redacted before sending to AI.</div></div>', unsafe_allow_html=True)
 
-    if st.button("🚀 Generate Jira Breakdown", key="run_jira"):
+    if st.button("🚀 Generate Jira Breakdown", key="run_jira", use_container_width=False):
         if not jira_raw.strip():
             st.warning("Enter a requirement.")
             st.stop()
-        with st.spinner(f"🧠 Generating {proj_type} breakdown via {get_next_provider()}..."):
+        with st.spinner(f"🧠 Generating industry-standard breakdown via {get_next_provider()} (temperature=0.1)..."):
             sp, up, pii_j = build_jira_prompt(jira_raw, proj_type, team_sz, sprint_l, method)
             if pii_j:
                 audit_log("JIRA_PII", SESSION_ID, f"Types:{pii_j}", "MEDIUM")
             audit_log("JIRA_QUERY", SESSION_ID, f"Type={proj_type},User={CURRENT_USER}", "LOW")
-            raw_out = call_ai([{"role": "system", "content": sp}, {"role": "user", "content": up}], temperature=0.3, task="jira")
+            raw_out = call_ai(
+                [{"role": "system", "content": sp}, {"role": "user", "content": up}],
+                temperature=0.1,   # Low temperature = structured, deterministic JSON
+                task="jira"
+            )
         if raw_out == RATE_LIMIT_SENTINEL:
             st.error("⏱️ All providers rate-limited. Click ⚡ Reset All Cooldowns in Tab 1, then retry.")
             st.stop()
 
         actual_prov = get_active_provider()
-        st.success(f"✅ Generated by {actual_prov}")
+        if "Gemini" in actual_prov:
+            st.success(f"✅ Generated by {actual_prov} (temperature=0.1)")
+        else:
+            st.warning(f"⚠️ Generated by {actual_prov} — Gemini was rate-limited but output should still be high quality.")
 
         try:
             jm = re.search(r"\{.*\}", raw_out, re.DOTALL)
@@ -1140,14 +1332,15 @@ with tab2:
         except Exception:
             jdata = {}
         if not jdata:
-            st.error("Could not parse AI output.")
+            st.error("Could not parse AI output as JSON. Raw output shown below:")
             st.markdown(raw_out)
             st.stop()
 
-        audit_log("JIRA_DONE", SESSION_ID, f"Stories={len(jdata.get('stories', []))},Provider={actual_prov}", "LOW")
+        stories_count = len(jdata.get("stories", []))
+        audit_log("JIRA_DONE", SESSION_ID, f"Stories={stories_count},Provider={actual_prov}", "LOW")
         st.session_state.jira_result = {"data": jdata, "type": proj_type, "edited": False}
 
-    # ── JIRA RESULT DISPLAY + EDIT + EXPORT ──────────────
+    # ── JIRA RESULT DISPLAY ───────────────────────────────
     if st.session_state.jira_result:
         jd = st.session_state.jira_result["data"]
         pt = st.session_state.jira_result["type"]
@@ -1155,72 +1348,120 @@ with tab2:
         stories = jd.get("stories", [])
         risks = jd.get("risks", [])
         deps = jd.get("dependencies", [])
+        sprint_plan = jd.get("sprint_plan", [])
         total_pts = sum(s.get("story_points", 0) for s in stories)
         sprints = epic.get("estimated_sprints", "?")
+        vel_display = int(team_sz * 8 * 0.7)
 
-        # Metrics
-        st.markdown(f'<div style="display:flex;gap:12px;margin:16px 0;flex-wrap:wrap;">'
-                    f'<div style="background:white;border:1px solid #E8E8E8;border-top:3px solid #B31B1B;border-radius:8px;padding:12px 16px;min-width:100px;text-align:center;flex:1;"><div style="font-size:24px;font-weight:700;color:#B31B1B;font-family:Rajdhani,sans-serif;">{len(stories)}</div><div style="font-size:10px;color:#999;">STORIES</div></div>'
-                    f'<div style="background:white;border:1px solid #E8E8E8;border-top:3px solid #B31B1B;border-radius:8px;padding:12px 16px;min-width:100px;text-align:center;flex:1;"><div style="font-size:24px;font-weight:700;color:#B31B1B;font-family:Rajdhani,sans-serif;">{total_pts}</div><div style="font-size:10px;color:#999;">POINTS</div></div>'
-                    f'<div style="background:white;border:1px solid #E8E8E8;border-top:3px solid #B31B1B;border-radius:8px;padding:12px 16px;min-width:100px;text-align:center;flex:1;"><div style="font-size:24px;font-weight:700;color:#B31B1B;font-family:Rajdhani,sans-serif;">{sprints}</div><div style="font-size:10px;color:#999;">SPRINTS</div></div>'
-                    f'<div style="background:white;border:1px solid #E8E8E8;border-top:3px solid #B31B1B;border-radius:8px;padding:12px 16px;min-width:100px;text-align:center;flex:1;"><div style="font-size:24px;font-weight:700;color:#B31B1B;font-family:Rajdhani,sans-serif;">{len(risks)}</div><div style="font-size:10px;color:#999;">RISKS</div></div>'
-                    f'</div>', unsafe_allow_html=True)
+        # Metrics row
+        st.markdown(f'''<div style="display:flex;gap:12px;margin:16px 0;flex-wrap:wrap;">
+            <div class="metric-box"><div class="metric-value">{len(stories)}</div><div class="metric-label">Stories</div></div>
+            <div class="metric-box"><div class="metric-value">{total_pts}</div><div class="metric-label">Total Points</div></div>
+            <div class="metric-box"><div class="metric-value">{sprints}</div><div class="metric-label">Sprints</div></div>
+            <div class="metric-box"><div class="metric-value">{len(risks)}</div><div class="metric-label">Risks</div></div>
+            <div class="metric-box"><div class="metric-value">{vel_display}</div><div class="metric-label">Pts/Sprint</div></div>
+            <div class="metric-box"><div class="metric-value">{len(deps)}</div><div class="metric-label">Dependencies</div></div>
+        </div>''', unsafe_allow_html=True)
 
         # Epic card
-        st.markdown(f'<div class="epic-card"><div class="epic-title">🏆 EPIC: {epic.get("title", "")}</div>'
-                    f'<div style="color:rgba(255,255,255,.85);font-size:13px;margin-top:6px;">{epic.get("business_value", "")}</div>'
-                    f'<div style="color:rgba(255,255,255,.85);font-size:13px;margin-top:6px;"><b>Objective:</b> {epic.get("objective", "")}</div>'
-                    f'</div>', unsafe_allow_html=True)
+        dod_html = "".join(f'<div style="font-size:12px;color:rgba(255,255,255,.8);padding:2px 0;">✓ {d}</div>' for d in epic.get("definition_of_done", []))
+        st.markdown(f'''<div class="epic-card">
+            <div class="epic-title">🏆 EPIC: {epic.get("title", "")}</div>
+            <div style="color:rgba(255,255,255,.85);font-size:13px;margin-top:8px;line-height:1.6;"><b>Business Value:</b> {epic.get("business_value", "")}</div>
+            <div style="color:rgba(255,255,255,.85);font-size:13px;margin-top:6px;line-height:1.6;"><b>Objective:</b> {epic.get("objective", "")}</div>
+            {f'<div style="margin-top:12px;"><div style="color:#FFC72C;font-size:11px;font-weight:700;letter-spacing:.5px;margin-bottom:6px;">DEFINITION OF DONE</div>{dod_html}</div>' if dod_html else ""}
+        </div>''', unsafe_allow_html=True)
 
-        # ── PO EDIT MODE ──────────────────────────────────
-        st.markdown('<div class="section-title">📝 Stories — View & Edit</div>', unsafe_allow_html=True)
+        # Sprint plan
+        if sprint_plan:
+            st.markdown('<div class="section-title">🏃 Sprint Plan</div>', unsafe_allow_html=True)
+            sp_cols = st.columns(min(len(sprint_plan), 3))
+            for si, sp_item in enumerate(sprint_plan):
+                with sp_cols[si % 3]:
+                    stories_in_sprint = ", ".join(sp_item.get("stories", []))
+                    st.markdown(f'''<div class="sprint-plan-card">
+                        <div style="font-size:13px;font-weight:700;color:#2E7D32;">{sp_item.get("sprint","")}</div>
+                        <div style="font-size:22px;font-weight:700;color:#B31B1B;font-family:Rajdhani,sans-serif;">{sp_item.get("total_points",0)} pts</div>
+                        <div style="font-size:12px;color:#555;margin:4px 0;font-style:italic;">"{sp_item.get("goal","")}"</div>
+                        <div style="font-size:11px;color:#888;">{stories_in_sprint}</div>
+                    </div>''', unsafe_allow_html=True)
+
+        # Stories
+        st.markdown('<div class="section-title">📖 User Stories</div>', unsafe_allow_html=True)
 
         edit_mode = st.toggle("✏️ Enable PO Edit Mode — modify stories before export", key="edit_toggle")
 
         if edit_mode:
-            st.markdown('<div class="jira-edit-panel"><b style="color:#B31B1B;">✏️ PO EDIT MODE ACTIVE</b> — All fields are editable. Changes saved to session.</div>', unsafe_allow_html=True)
+            st.markdown('<div class="jira-edit-panel"><b style="color:#B31B1B;">✏️ PO EDIT MODE ACTIVE</b> — All fields are editable. Changes saved to session on "Save All Edits".</div>', unsafe_allow_html=True)
 
-            # Edit Epic
             with st.expander("✏️ Edit Epic", expanded=False):
                 new_epic_title = st.text_input("Epic Title", value=epic.get("title", ""), key="edit_epic_title")
                 new_epic_bv = st.text_area("Business Value", value=epic.get("business_value", ""), key="edit_epic_bv", height=80)
                 new_epic_obj = st.text_area("Objective", value=epic.get("objective", ""), key="edit_epic_obj", height=80)
                 new_sprints = st.number_input("Estimated Sprints", value=int(sprints) if str(sprints).isdigit() else 3, min_value=1, max_value=20, key="edit_sprints")
 
-            # Edit Stories
             edited_stories = []
             for i, s in enumerate(stories):
                 with st.expander(f"✏️ {s.get('id', 'US')} — {s.get('title', '')}", expanded=False):
                     col1, col2 = st.columns([3, 1])
                     with col1:
                         new_title = st.text_input("Title", value=s.get("title", ""), key=f"s_title_{i}")
-                        new_us = st.text_area("User Story", value=s.get("user_story", ""), key=f"s_us_{i}", height=80)
+                        new_us = st.text_area("User Story (As a... I want... so that...)", value=s.get("user_story", ""), key=f"s_us_{i}", height=90)
+                        new_bv = st.text_input("Business Value", value=s.get("business_value", ""), key=f"s_bv_{i}")
                     with col2:
                         new_pri = st.selectbox("Priority", ["Critical", "High", "Medium", "Low"],
                                                index=["critical","high","medium","low"].index(s.get("priority","medium").lower()) if s.get("priority","medium").lower() in ["critical","high","medium","low"] else 1,
                                                key=f"s_pri_{i}")
-                        new_pts = st.selectbox("Points", [1, 2, 3, 5, 8, 13],
+                        new_pts = st.selectbox("Points (Fibonacci)", [1, 2, 3, 5, 8, 13],
                                                index=[1,2,3,5,8,13].index(s.get("story_points", 5)) if s.get("story_points", 5) in [1,2,3,5,8,13] else 3,
                                                key=f"s_pts_{i}")
                         new_sprint = st.text_input("Sprint", value=s.get("sprint", f"Sprint {i//2+1}"), key=f"s_sprint_{i}")
                         new_type = st.selectbox("Type", ["Feature", "Bug", "Spike", "Tech Debt", "Enabler"],
                                                 index=0, key=f"s_type_{i}")
-                    # AC editing
-                    st.markdown("**Acceptance Criteria** (one per line)")
+                    st.markdown("**Acceptance Criteria** (one Gherkin statement per line: Given... When... Then...)")
                     ac_text = "\n".join(s.get("acceptance_criteria", []))
-                    new_ac_raw = st.text_area("AC", value=ac_text, key=f"s_ac_{i}", height=120, label_visibility="collapsed")
+                    new_ac_raw = st.text_area("AC", value=ac_text, key=f"s_ac_{i}", height=140, label_visibility="collapsed")
                     new_ac = [l.strip() for l in new_ac_raw.split("\n") if l.strip()]
+
+                    # Subtask editing
+                    st.markdown("**SDLC Subtasks (hours)**")
+                    edited_subtasks = []
+                    default_subtasks = [
+                        {"title": "Analysis & Design", "description": "Requirements analysis, solution design, wireframes/data model", "hours": 6, "role": "Business Analyst / Tech Lead"},
+                        {"title": "Development", "description": "Feature implementation per acceptance criteria", "hours": 10, "role": "Developer"},
+                        {"title": "Testing & QA", "description": "Unit, integration, UAT test cases, regression suite", "hours": 5, "role": "QA Engineer"},
+                        {"title": "Deployment & Release", "description": "Environment config, deploy to staging and prod, smoke tests", "hours": 2, "role": "DevOps / Developer"},
+                        {"title": "Documentation", "description": "Technical docs, user guide, Confluence page", "hours": 2, "role": "Developer / BA"},
+                    ]
+                    current_subtasks = s.get("subtasks", default_subtasks)
+                    st_cols = st.columns(5)
+                    st_labels = ["🔍 Analysis", "💻 Dev", "🧪 Testing", "🚀 Deploy", "📝 Docs"]
+                    for si2, (stc, stl) in enumerate(zip(current_subtasks[:5], st_labels)):
+                        new_hrs = st_cols[si2].number_input(
+                            f"{stl} (h)", min_value=1, max_value=40,
+                            value=int(stc.get("hours", 4)),
+                            key=f"s_{i}_st_{si2}"
+                        )
+                        edited_subtasks.append({
+                            "title": stc.get("title", stl),
+                            "description": stc.get("description", ""),
+                            "hours": new_hrs,
+                            "role": stc.get("role", ""),
+                        })
 
                     edited_stories.append({
                         "id": s.get("id", f"US-{i+1:03d}"),
                         "title": new_title,
                         "user_story": new_us,
+                        "business_value": new_bv,
                         "priority": new_pri,
                         "story_points": new_pts,
+                        "points_rationale": s.get("points_rationale", ""),
                         "sprint": new_sprint,
                         "type": new_type,
                         "acceptance_criteria": new_ac,
-                        "subtasks": s.get("subtasks", []),
+                        "definition_of_ready": s.get("definition_of_ready", []),
+                        "subtasks": edited_subtasks,
                     })
 
             if st.button("💾 Save All Edits", key="save_edits"):
@@ -1235,29 +1476,127 @@ with tab2:
                 updated["stories"] = edited_stories
                 st.session_state.jira_result["data"] = updated
                 st.session_state.jira_result["edited"] = True
-                st.success("✅ All edits saved! Now export to Jira below.")
+                st.success("✅ All edits saved! Scroll down to export to Jira.")
                 st.rerun()
 
         else:
-            # View-only mode
+            # ── View-only — upgraded display with all new fields ──
             pbadge = {"critical": "badge-critical", "high": "badge-high", "medium": "badge-medium", "low": "badge-low"}
+            SUBTASK_ICONS = {
+                "Analysis": "🔍", "Development": "💻",
+                "Testing": "🧪", "Deployment": "🚀", "Documentation": "📝"
+            }
+
             for s in stories:
                 pri = s.get("priority", "Medium")
                 pts = s.get("story_points", 0)
                 pb = pbadge.get(pri.lower(), "badge-medium")
-                with st.expander(f"  {s.get('id','US')} · {s.get('title','')}  [{pri}] [{pts}pts]", expanded=False):
-                    acs = "".join(f'<div class="ac-item">• {a}</div>' for a in s.get("acceptance_criteria", []))
-                    st.markdown(f'<div class="story-card"><div class="story-id">{s.get("id","US")} · {pt}</div>'
-                                f'<div class="story-title">{s.get("title","")}</div>'
-                                f'<div style="font-size:13px;color:#555;font-style:italic;">{s.get("user_story","")}</div>'
-                                f'<div class="story-badges"><span class="{pb}">🔴 {pri}</span>'
-                                f'<span class="badge-points">⭐ {pts} pts</span>'
-                                f'<span class="badge-sprint">🏃 {s.get("sprint","")}</span>'
-                                f'<span class="badge-type">🏷 {s.get("type","")}</span></div>'
-                                f'<div class="ac-section"><div class="ac-title">✅ Acceptance Criteria</div>{acs}</div>'
-                                f'</div>', unsafe_allow_html=True)
+                total_hours = sum(st_i.get("hours", 0) for st_i in s.get("subtasks", []))
 
-        # ── JIRA EXPORT PANEL ─────────────────────────────
+                with st.expander(
+                    f"  {s.get('id','US')} · {s.get('title','')}  [{pri}] [{pts}pts] [{s.get('sprint','')}]",
+                    expanded=False
+                ):
+                    # User story — highlighted blue block
+                    st.markdown(
+                        f'<div class="user-story-block">💬 {s.get("user_story","")}</div>',
+                        unsafe_allow_html=True
+                    )
+
+                    # Business value
+                    bv = s.get("business_value", "")
+                    if bv:
+                        st.markdown(
+                            f'<div class="biz-value-block">💡 <b>Business Value:</b> {bv}</div>',
+                            unsafe_allow_html=True
+                        )
+
+                    # Badges row
+                    pr_text = s.get("points_rationale", "")
+                    st.markdown(
+                        f'<div class="story-badges">'
+                        f'<span class="{pb}">● {pri}</span>'
+                        f'<span class="badge-points">⭐ {pts} pts</span>'
+                        f'<span class="badge-sprint">🏃 {s.get("sprint","")}</span>'
+                        f'<span class="badge-type">🏷 {s.get("type","")}</span>'
+                        f'<span style="background:#F3E5F5;color:#6A1B9A;border:1px solid #CE93D8;padding:2px 8px;border-radius:10px;font-size:11px;">⏱ {total_hours}h total</span>'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
+                    if pr_text:
+                        st.markdown(
+                            f'<div class="points-rationale-block">📊 {pr_text}</div>',
+                            unsafe_allow_html=True
+                        )
+
+                    # Acceptance Criteria
+                    acs_html = "".join(
+                        f'<div class="ac-item">{"🟢" if idx==0 else "🟡" if idx==1 else "🔴"} <b>{"Happy Path" if idx==0 else "Edge Case" if idx==1 else "Error Scenario"}:</b> {a}</div>'
+                        for idx, a in enumerate(s.get("acceptance_criteria", []))
+                    )
+                    st.markdown(
+                        f'<div class="ac-section"><div class="ac-title">✅ Acceptance Criteria — Gherkin Given/When/Then</div>{acs_html}</div>',
+                        unsafe_allow_html=True
+                    )
+
+                    # Definition of Ready
+                    dor = s.get("definition_of_ready", [])
+                    if dor:
+                        dor_html = "".join(f'<div style="font-size:12px;color:#444;padding:2px 0 2px 10px;border-left:2px solid #90CAF9;">▸ {d}</div>' for d in dor)
+                        st.markdown(
+                            f'<div style="margin-top:10px;"><div style="font-size:11px;font-weight:700;color:#1565C0;text-transform:uppercase;margin-bottom:5px;">📋 Definition of Ready</div>{dor_html}</div>',
+                            unsafe_allow_html=True
+                        )
+
+                    # SDLC Subtasks
+                    subtasks = s.get("subtasks", [])
+                    if subtasks:
+                        subtask_rows = ""
+                        for st_item in subtasks:
+                            title = st_item.get("title", "")
+                            icon = next((v for k, v in SUBTASK_ICONS.items() if k in title), "⚙️")
+                            role = st_item.get("role", "")
+                            hours = st_item.get("hours", "?")
+                            desc = st_item.get("description", "")
+                            subtask_rows += f'''<div class="subtask-row">
+                                <div class="subtask-icon">{icon}</div>
+                                <div class="subtask-content">
+                                    <div class="subtask-title">{title}</div>
+                                    <div class="subtask-meta">~{hours}h &nbsp;·&nbsp; {role}</div>
+                                    <div class="subtask-desc">{desc}</div>
+                                </div>
+                            </div>'''
+                        st.markdown(
+                            f'<div class="sdlc-section"><div class="sdlc-title">🔧 SDLC Subtasks — {total_hours}h estimated</div>{subtask_rows}</div>',
+                            unsafe_allow_html=True
+                        )
+
+        # Risks
+        if risks:
+            st.markdown('<div class="section-title">⚠️ Risk Register</div>', unsafe_allow_html=True)
+            risk_cols = st.columns(min(len(risks), 2))
+            for ri, risk in enumerate(risks):
+                lik = risk.get("likelihood", "Medium")
+                imp = risk.get("impact", "Medium")
+                lik_color = "#C62828" if lik == "High" else "#E65100" if lik == "Medium" else "#2E7D32"
+                with risk_cols[ri % 2]:
+                    st.markdown(f'''<div class="risk-card">
+                        <div style="font-weight:700;font-size:13px;color:#333;">{risk.get("title","")}</div>
+                        <div style="font-size:12px;color:#555;margin:4px 0;">{risk.get("description","")}</div>
+                        <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap;">
+                            <span style="background:#FFF3E0;color:{lik_color};border:1px solid #FFCC80;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:700;">Likelihood: {lik}</span>
+                            <span style="background:#FFEBEE;color:#B71C1C;border:1px solid #EF9A9A;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:700;">Impact: {imp}</span>
+                        </div>
+                        <div style="font-size:12px;color:#2E7D32;margin-top:6px;background:#F1F8E9;padding:5px 8px;border-radius:5px;">🛡️ <b>Mitigation:</b> {risk.get("mitigation","")}</div>
+                    </div>''', unsafe_allow_html=True)
+
+        # Dependencies
+        if deps:
+            st.markdown('<div class="section-title">🔗 Dependencies</div>', unsafe_allow_html=True)
+            dep_data = [{"Story": d.get("story_id",""), "Depends On": d.get("depends_on",""), "Reason": d.get("reason","")} for d in deps]
+            st.dataframe(pd.DataFrame(dep_data), use_container_width=True, hide_index=True)
+
+        # ── EXPORT PANEL ──────────────────────────────────
         st.markdown("---")
         st.markdown('<div class="jira-export-panel"><div style="color:#69F0AE;font-family:monospace;font-size:13px;font-weight:700;letter-spacing:1px;margin-bottom:12px;">🚀 EXPORT TO JIRA</div>', unsafe_allow_html=True)
 
@@ -1265,9 +1604,12 @@ with tab2:
 
         with export_tab1:
             st.markdown("""<div style="background:rgba(255,255,255,.1);border-radius:8px;padding:12px;margin-bottom:12px;">
-                <div style="color:white;font-size:12px;font-weight:700;margin-bottom:6px;">🔐 Jira Connection Settings</div>
-                <div style="color:rgba(255,255,255,.7);font-size:11px;">Enter your Jira Cloud credentials to push stories directly. 
-                API Token: <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" style="color:#69F0AE;">Get token here</a></div>
+                <div style="color:white;font-size:12px;font-weight:700;margin-bottom:6px;">🔐 Jira Cloud Connection</div>
+                <div style="color:rgba(255,255,255,.7);font-size:11px;">
+                    Each story will be created with: full User Story + Gherkin AC + Business Value + Definition of Ready in the description.<br>
+                    All 5 SDLC subtasks created as child issues with role and hour estimates.<br>
+                    API Token: <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" style="color:#69F0AE;">Get token here →</a>
+                </div>
             </div>""", unsafe_allow_html=True)
 
             j_col1, j_col2 = st.columns(2)
@@ -1283,27 +1625,27 @@ with tab2:
                 else:
                     try:
                         test_url = "{}/rest/api/3/project/{}".format(jira_url.rstrip("/"), jira_proj)
-                        r = requests.get(test_url, auth=(jira_email, jira_token), timeout=10)
-                        if r.status_code == 200:
-                            proj_data = r.json()
+                        r_test = requests.get(test_url, auth=(jira_email, jira_token), timeout=10)
+                        if r_test.status_code == 200:
+                            proj_data = r_test.json()
                             st.success(f"✅ Connected! Project: **{proj_data.get('name', jira_proj)}** | Type: {proj_data.get('projectTypeKey','?')}")
-                        elif r.status_code == 401:
+                        elif r_test.status_code == 401:
                             st.error("❌ 401 Unauthorized — check your email and API token.")
-                        elif r.status_code == 404:
+                        elif r_test.status_code == 404:
                             st.error(f"❌ 404 Project '{jira_proj}' not found — check your Project Key.")
                         else:
-                            st.error(f"❌ HTTP {r.status_code}: {r.text[:200]}")
+                            st.error(f"❌ HTTP {r_test.status_code}: {r_test.text[:200]}")
                     except Exception as e:
                         st.error(f"❌ Connection error: {e}")
 
-            if st.button("🚀 Push All Stories + Subtasks to Jira", key="push_jira", use_container_width=True):
+            if st.button("🚀 Push All Stories + SDLC Subtasks to Jira", key="push_jira", use_container_width=True):
                 if not all([jira_url, jira_email, jira_token, jira_proj]):
                     st.error("❌ Please fill all Jira connection fields.")
                 else:
                     current_stories = st.session_state.jira_result["data"].get("stories", [])
                     current_epic = st.session_state.jira_result["data"].get("epic", {})
                     total_subtasks = sum(len(s.get("subtasks", [])) for s in current_stories)
-                    st.info(f"📤 Pushing {len(current_stories)} stories + {total_subtasks} subtasks to Jira project **{jira_proj}**...")
+                    st.info(f"📤 Pushing {len(current_stories)} stories + {total_subtasks} SDLC subtasks to Jira project **{jira_proj}**...")
 
                     success_count, fail_count = 0, 0
                     total_subtask_created = 0
@@ -1320,41 +1662,41 @@ with tab2:
 
                         if ok:
                             success_count += 1
-                            subtask_display = ", ".join(subtask_keys) if subtask_keys else "none"
                             results_log.append({
                                 "Story ID": story.get("id", "?"),
-                                "Title": story.get("title", "")[:35],
+                                "Title": story.get("title", "")[:40],
                                 "Jira Key": parent_key,
-                                "Subtasks Created": subtask_count,
-                                "Subtask Keys": subtask_display[:40],
-                                "AC Count": len(story.get("acceptance_criteria", [])),
+                                "SDLC Subtasks": subtask_count,
+                                "Subtask Keys": ", ".join(subtask_keys)[:50] if subtask_keys else "none",
+                                "Points": story.get("story_points", "?"),
+                                "Sprint": story.get("sprint", "?"),
                                 "Status": "✅ Created",
                             })
                         else:
                             fail_count += 1
                             results_log.append({
                                 "Story ID": story.get("id", "?"),
-                                "Title": story.get("title", "")[:35],
+                                "Title": story.get("title", "")[:40],
                                 "Jira Key": "-",
-                                "Subtasks Created": 0,
+                                "SDLC Subtasks": 0,
                                 "Subtask Keys": "-",
-                                "AC Count": 0,
+                                "Points": story.get("story_points", "?"),
+                                "Sprint": story.get("sprint", "?"),
                                 "Status": f"❌ {parent_key[:60]}",
                             })
                         progress.progress((idx + 1) / len(current_stories))
 
-                    # Summary
                     if success_count > 0:
-                        st.success(f"✅ {success_count} stories + {total_subtask_created} subtasks pushed to Jira!")
+                        st.success(f"✅ {success_count} stories + {total_subtask_created} SDLC subtasks pushed to Jira!")
                         st.markdown(f"""
                         <div style='background:#E8F5E9;border:1px solid #A5D6A7;border-radius:8px;padding:12px 16px;margin:8px 0;font-size:13px;'>
                         🎯 <b>What was created in Jira project <code>{jira_proj}</code>:</b><br>
-                        &nbsp;&nbsp;• <b>{success_count}</b> parent issues (stories/tasks) — each with full User Story + Acceptance Criteria in description<br>
-                        &nbsp;&nbsp;• <b>{total_subtask_created}</b> child subtask issues — linked to their parent, with hour estimates<br>
-                        &nbsp;&nbsp;• View on your board: <a href="{jira_url}/jira/software/projects/{jira_proj}/boards" target="_blank">{jira_url}/jira/software/projects/{jira_proj}/boards</a>
+                        &nbsp;&nbsp;• <b>{success_count}</b> parent issues — each with "As a..." user story, Gherkin AC, Business Value, DoR<br>
+                        &nbsp;&nbsp;• <b>{total_subtask_created}</b> SDLC subtask issues — Analysis, Development, Testing, Deployment, Documentation<br>
+                        &nbsp;&nbsp;• View on your board: <a href="{jira_url}/jira/software/projects/{jira_proj}/boards" target="_blank" style="color:#1565C0;">{jira_url}/jira/software/projects/{jira_proj}/boards →</a>
                         </div>""", unsafe_allow_html=True)
                     if fail_count > 0:
-                        st.warning(f"⚠️ {fail_count} stories failed. See error details in the table below.")
+                        st.warning(f"⚠️ {fail_count} stories failed — see error details below.")
 
                     st.dataframe(pd.DataFrame(results_log), use_container_width=True, hide_index=True)
                     audit_log("JIRA_EXPORT", SESSION_ID,
@@ -1367,29 +1709,114 @@ with tab2:
             current_epic = current_data.get("epic", {})
 
             ec1, ec2, ec3 = st.columns(3)
-            txt = "\n".join([f"EPIC: {current_epic.get('title', '')}\n"] +
-                            [f"\n{s.get('id', '')} — {s.get('title', '')}\n  {s.get('user_story', '')}\n  Priority: {s.get('priority','')} | Points: {s.get('story_points','')} | {s.get('sprint','')}\n  AC:\n" +
-                             "\n".join(f"    • {a}" for a in s.get("acceptance_criteria", []))
-                             for s in current_stories])
-            ec1.download_button("⬇ TXT", txt, "jira_breakdown.txt", "text/plain")
 
+            # TXT export
+            txt_lines = [
+                f"EPIC: {current_epic.get('title', '')}",
+                f"Business Value: {current_epic.get('business_value', '')}",
+                f"Objective: {current_epic.get('objective', '')}",
+                f"Estimated Sprints: {current_epic.get('estimated_sprints', '')}",
+                "",
+                "DEFINITION OF DONE:",
+            ]
+            for d in current_epic.get("definition_of_done", []):
+                txt_lines.append(f"  ✓ {d}")
+            txt_lines.append("")
+            for s in current_stories:
+                txt_lines += [
+                    f"{'='*60}",
+                    f"{s.get('id', '')} — {s.get('title', '')}",
+                    f"User Story: {s.get('user_story', '')}",
+                    f"Priority: {s.get('priority','')} | Points: {s.get('story_points','')} | Sprint: {s.get('sprint','')} | Type: {s.get('type','')}",
+                    f"Business Value: {s.get('business_value','')}",
+                    f"Points Rationale: {s.get('points_rationale','')}",
+                    "",
+                    "ACCEPTANCE CRITERIA (Gherkin):",
+                ]
+                for idx, ac in enumerate(s.get("acceptance_criteria", [])):
+                    label = "Happy Path" if idx == 0 else "Edge Case" if idx == 1 else "Error Scenario"
+                    txt_lines.append(f"  [{label}] {ac}")
+                txt_lines.append("")
+                txt_lines.append("DEFINITION OF READY:")
+                for d in s.get("definition_of_ready", []):
+                    txt_lines.append(f"  ▸ {d}")
+                txt_lines.append("")
+                txt_lines.append("SDLC SUBTASKS:")
+                for st_item in s.get("subtasks", []):
+                    txt_lines.append(f"  • {st_item.get('title','')} (~{st_item.get('hours','')}h) — {st_item.get('role','')} — {st_item.get('description','')}")
+                txt_lines.append("")
+
+            txt_export = "\n".join(txt_lines)
+            ec1.download_button("⬇ TXT", txt_export, "jira_breakdown_v8.txt", "text/plain")
+
+            # Excel export
             xb = BytesIO()
             with pd.ExcelWriter(xb, engine="xlsxwriter") as w:
+                # Stories sheet
+                stories_rows = []
+                for s in current_stories:
+                    stories_rows.append({
+                        "ID": s.get("id", ""),
+                        "Title": s.get("title", ""),
+                        "User Story (As a...)": s.get("user_story", ""),
+                        "Business Value": s.get("business_value", ""),
+                        "Priority": s.get("priority", ""),
+                        "Story Points": s.get("story_points", ""),
+                        "Points Rationale": s.get("points_rationale", ""),
+                        "Sprint": s.get("sprint", ""),
+                        "Type": s.get("type", ""),
+                        "Acceptance Criteria": "\n".join(s.get("acceptance_criteria", [])),
+                        "Definition of Ready": "\n".join(s.get("definition_of_ready", [])),
+                        "Total Hours": sum(st_i.get("hours", 0) for st_i in s.get("subtasks", [])),
+                    })
+                pd.DataFrame(stories_rows).to_excel(w, sheet_name="Stories", index=False)
+
+                # Subtasks sheet
+                subtask_rows = []
+                for s in current_stories:
+                    for st_item in s.get("subtasks", []):
+                        subtask_rows.append({
+                            "Story ID": s.get("id",""),
+                            "Story Title": s.get("title","")[:40],
+                            "Subtask": st_item.get("title",""),
+                            "Description": st_item.get("description",""),
+                            "Hours": st_item.get("hours",""),
+                            "Role": st_item.get("role",""),
+                        })
+                if subtask_rows:
+                    pd.DataFrame(subtask_rows).to_excel(w, sheet_name="SDLC Subtasks", index=False)
+
+                # Epic sheet
                 pd.DataFrame([{
-                    "ID": s.get("id", ""), "Title": s.get("title", ""),
-                    "User Story": s.get("user_story", ""), "Priority": s.get("priority", ""),
-                    "Points": s.get("story_points", ""), "Sprint": s.get("sprint", ""),
-                    "Type": s.get("type", ""),
-                    "Acceptance Criteria": "\n".join(s.get("acceptance_criteria", [])),
-                } for s in current_stories]).to_excel(w, sheet_name="Stories", index=False)
-                pd.DataFrame([{"Title": current_epic.get("title",""), "Business Value": current_epic.get("business_value",""),
-                                "Objective": current_epic.get("objective",""), "Sprints": current_epic.get("estimated_sprints","")}
-                               ]).to_excel(w, sheet_name="Epic", index=False)
+                    "Title": current_epic.get("title",""),
+                    "Business Value": current_epic.get("business_value",""),
+                    "Objective": current_epic.get("objective",""),
+                    "Estimated Sprints": current_epic.get("estimated_sprints",""),
+                    "Definition of Done": "\n".join(current_epic.get("definition_of_done", [])),
+                }]).to_excel(w, sheet_name="Epic", index=False)
+
+                # Sprint plan sheet
+                if sprint_plan:
+                    sp_rows = [{"Sprint": sp_item.get("sprint",""), "Stories": ", ".join(sp_item.get("stories",[])),
+                                "Total Points": sp_item.get("total_points",""), "Sprint Goal": sp_item.get("goal","")}
+                               for sp_item in sprint_plan]
+                    pd.DataFrame(sp_rows).to_excel(w, sheet_name="Sprint Plan", index=False)
+
+                # Risks sheet
                 if current_data.get("risks"):
                     pd.DataFrame(current_data["risks"]).to_excel(w, sheet_name="Risks", index=False)
-            ec2.download_button("⬇ Excel", xb.getvalue(), "jira_breakdown.xlsx",
-                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            ec3.download_button("⬇ JSON", json.dumps(current_data, indent=2), "jira_breakdown.json", "application/json")
+
+                # Dependencies sheet
+                if current_data.get("dependencies"):
+                    pd.DataFrame(current_data["dependencies"]).to_excel(w, sheet_name="Dependencies", index=False)
+
+            ec2.download_button(
+                "⬇ Excel (6 sheets)",
+                xb.getvalue(),
+                "jira_breakdown_v8.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            ec3.download_button("⬇ JSON", json.dumps(current_data, indent=2), "jira_breakdown_v8.json", "application/json")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1399,13 +1826,15 @@ with tab2:
 # ───────────────────────────────────────────────────────────
 with tab3:
     st.markdown(f"""<div style="background:linear-gradient(135deg,#B31B1B,#7a1212);border-radius:12px;padding:28px 32px;margin-bottom:24px;">
-        <div style="color:#FFC72C;font-family:'Rajdhani',sans-serif;font-size:28px;font-weight:700;margin-bottom:8px;">⚡ v7.0 — Full Feature Release</div>
-        <div style="color:rgba(255,255,255,.85);font-size:14px;line-height:2.0;">
-            ✅ <b>FIX:</b> Example prompts load real banking sample data (customers/accounts/transactions)<br>
-            ✅ <b>NEW:</b> PO Edit Mode — edit every story field before export<br>
-            ✅ <b>NEW:</b> Push to Jira Cloud via REST API with one click<br>
-            ✅ <b>NEW:</b> Login page with user approval flow — all requests come to admin<br>
-            ✅ Active right now: <b style="color:#69F0AE;">{active_prov} ({active_model})</b>
+        <div style="color:#FFC72C;font-family:'Rajdhani',sans-serif;font-size:28px;font-weight:700;margin-bottom:8px;">⚡ v8.0 — Industry-Grade Jira Breakdown</div>
+        <div style="color:rgba(255,255,255,.85);font-size:14px;line-height:2.2;">
+            ✅ <b>User stories:</b> "As a [Business Persona], I want [capability], so that [measurable benefit]" — enforced by AI<br>
+            ✅ <b>SDLC subtasks:</b> Always 5 phases — Analysis &amp; Design → Development → Testing &amp; QA → Deployment → Documentation<br>
+            ✅ <b>Gherkin AC:</b> Given/When/Then with Happy Path + Edge Case + Error Scenario per story<br>
+            ✅ <b>Velocity planning:</b> Team size × 8 pts × 70% capacity = sprint points limit<br>
+            ✅ <b>New fields:</b> Business Value per story, Points Rationale, Definition of Ready, Sprint Goals<br>
+            ✅ <b>Enhanced risks:</b> Likelihood + Impact + Mitigation for each risk<br>
+            ✅ <b>Active provider:</b> <span style="color:#69F0AE;">{active_prov} ({active_model})</span>
         </div>
     </div>""", unsafe_allow_html=True)
 
@@ -1423,6 +1852,31 @@ with tab3:
             <div style="font-family:'Rajdhani',sans-serif;font-size:38px;font-weight:700;color:#29B6F6;">100%</div>
             <div style="font-size:10px;color:#999;text-transform:uppercase;">Data Stays Local</div></div>
     </div>""", unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.markdown("### 📖 Jira Breakdown — Before vs After v8.0")
+    bcol1, bcol2 = st.columns(2)
+    with bcol1:
+        st.markdown("""<div style="background:#FFF3E0;border:2px solid #FFB300;border-radius:10px;padding:18px;">
+        <div style="font-weight:700;color:#E65100;margin-bottom:10px;">❌ Before (Generic Stories)</div>
+        <div style="font-size:12px;color:#555;line-height:2.0;">
+        • "Implement customer login feature"<br>
+        • "Add account balance API"<br>
+        • Subtasks: "Code the feature", "Test it"<br>
+        • AC: "Feature should work correctly"<br>
+        • No business value, no personas<br>
+        • No sprint planning, no velocity calc
+        </div></div>""", unsafe_allow_html=True)
+    with bcol2:
+        st.markdown("""<div style="background:#E8F5E9;border:2px solid #66BB6A;border-radius:10px;padding:18px;">
+        <div style="font-weight:700;color:#2E7D32;margin-bottom:10px;">✅ After (v8.0 Industry-Standard)</div>
+        <div style="font-size:12px;color:#333;line-height:2.0;">
+        • "As a Bank Customer, I want to view my account balance, so that I can make informed spending decisions"<br>
+        • 5 SDLC subtasks: Analysis(6h) → Dev(10h) → Testing(5h) → Deploy(2h) → Docs(2h)<br>
+        • Given/When/Then AC: Happy Path + Edge Case + Error<br>
+        • Business value, Points rationale, Sprint goal<br>
+        • Velocity-aware sprint allocation
+        </div></div>""", unsafe_allow_html=True)
 
 
 # ───────────────────────────────────────────────────────────
@@ -1479,7 +1933,7 @@ with tab4:
 
 
 # ───────────────────────────────────────────────────────────
-# ADMIN TAB (admin only)
+# ADMIN TAB
 # ───────────────────────────────────────────────────────────
 if tab_admin is not None:
     with tab_admin:
