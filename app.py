@@ -557,48 +557,150 @@ RULES: 4-7 stories, Fibonacci points (1/2/3/5/8/13), Gherkin AC, ONLY JSON outpu
 # ═══════════════════════════════════════════════════════════
 # JIRA EXPORT — push to Jira REST API
 # ═══════════════════════════════════════════════════════════
+
+def _jira_post(url, payload, auth, headers):
+    """Helper — POST to Jira, auto-retry Story/Task issuetype."""
+    resp = requests.post(url, json=payload, headers=headers, auth=auth, timeout=15)
+    if resp.status_code in [200, 201]:
+        return True, resp.json().get("key", "?")
+    # If issuetype rejected, flip Task<->Story and retry once
+    if resp.status_code == 400 and "issuetype" in resp.text.lower():
+        current = payload["fields"]["issuetype"]["name"]
+        payload["fields"]["issuetype"]["name"] = "Story" if current == "Task" else "Task"
+        resp2 = requests.post(url, json=payload, headers=headers, auth=auth, timeout=15)
+        if resp2.status_code in [200, 201]:
+            return True, resp2.json().get("key", "?")
+        return False, "HTTP {}: {}".format(resp2.status_code, resp2.text[:300])
+    return False, "HTTP {}: {}".format(resp.status_code, resp.text[:300])
+
+
+def _build_adf(story, epic_title):
+    """Build Atlassian Document Format description with User Story + AC + Subtask list."""
+    ac_items = []
+    for ac in story.get("acceptance_criteria", []):
+        ac_items.append({
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": str(ac)}]}]
+        })
+
+    subtask_items = []
+    for st_item in story.get("subtasks", []):
+        label = "{} (~{}h)".format(st_item.get("title", ""), st_item.get("hours", "?"))
+        subtask_items.append({
+            "type": "listItem",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": label}]}]
+        })
+
+    content_blocks = [
+        # User Story italic
+        {"type": "paragraph", "content": [
+            {"type": "text", "text": story.get("user_story", ""), "marks": [{"type": "em"}]}
+        ]},
+        # Meta line
+        {"type": "paragraph", "content": [{"type": "text", "text":
+            "Sprint: {} | Points: {} | Priority: {} | Epic: {}".format(
+                story.get("sprint",""), story.get("story_points",""),
+                story.get("priority",""), epic_title),
+            "marks": [{"type": "strong"}]
+        }]},
+        # Acceptance Criteria heading + list
+        {"type": "heading", "attrs": {"level": 3}, "content": [
+            {"type": "text", "text": "Acceptance Criteria"}
+        ]},
+    ]
+    if ac_items:
+        content_blocks.append({"type": "bulletList", "content": ac_items})
+    else:
+        content_blocks.append({"type": "paragraph", "content": [{"type": "text", "text": "No AC defined."}]})
+
+    # Subtasks summary in description
+    if subtask_items:
+        content_blocks.append({"type": "heading", "attrs": {"level": 3}, "content": [
+            {"type": "text", "text": "Subtasks (also created as child issues)"}
+        ]})
+        content_blocks.append({"type": "bulletList", "content": subtask_items})
+
+    return {"type": "doc", "version": 1, "content": content_blocks}
+
+
 def push_story_to_jira(story, epic_title, jira_url, jira_email, jira_token, jira_project_key):
-    """Push a single story to Jira Cloud via REST API"""
-    url = f"{jira_url.rstrip('/')}/rest/api/3/issue"
+    """
+    Push one story + all its subtasks to Jira Cloud.
+    Returns: (ok: bool, message: str, subtask_keys: list)
+    """
+    base_url = jira_url.rstrip("/")
+    issue_url = "{}/rest/api/3/issue".format(base_url)
     headers = {"Content-Type": "application/json"}
     auth = (jira_email, jira_token)
 
     priority_map = {"critical": "Highest", "high": "High", "medium": "Medium", "low": "Low"}
     priority = priority_map.get(story.get("priority", "medium").lower(), "Medium")
 
-    # Build description with ADF (Atlassian Document Format)
-    ac_content = []
-    for ac in story.get("acceptance_criteria", []):
-        ac_content.append({"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": ac}]}]})
+    # Clean summary — plain hyphen, strip special chars that break Jira
+    raw_summary = "{} - {}".format(story.get("id", "US"), story.get("title", ""))
+    summary = raw_summary.encode("ascii", "ignore").decode("ascii")  # strip non-ASCII
 
-    payload = {
+    labels = [
+        story.get("type", "Feature").replace(" ", "-"),
+        story.get("sprint", "Sprint-1").replace(" ", "-"),
+    ]
+
+    # ── STEP 1: Create parent story/task ─────────────────
+    parent_payload = {
         "fields": {
             "project": {"key": jira_project_key},
-            "summary": f"{story.get('id', 'US')} — {story.get('title', '')}",
-            "description": {
-                "type": "doc", "version": 1,
-                "content": [
-                    {"type": "paragraph", "content": [{"type": "text", "text": story.get("user_story", ""), "marks": [{"type": "em"}]}]},
-                    {"type": "heading", "attrs": {"level": 3}, "content": [{"type": "text", "text": "Acceptance Criteria"}]},
-                    {"type": "bulletList", "content": ac_content},
-                    {"type": "paragraph", "content": [{"type": "text", "text": f"Sprint: {story.get('sprint', '')} | Points: {story.get('story_points', '')} | Epic: {epic_title}"}]},
-                ]
-            },
-            "issuetype": {"name": "Story"},
+            "summary": summary,
+            "description": _build_adf(story, epic_title),
+            "issuetype": {"name": "Task"},
             "priority": {"name": priority},
-            "story_points": story.get("story_points", 0),
-            "labels": [story.get("type", "Feature"), story.get("sprint", "").replace(" ", "-")],
+            "labels": labels,
         }
     }
 
-    try:
-        resp = requests.post(url, json=payload, headers=headers, auth=auth, timeout=10)
-        if resp.status_code in [200, 201]:
-            return True, resp.json().get("key", "?")
-        else:
-            return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
-    except Exception as e:
-        return False, str(e)
+    ok, parent_key = _jira_post(issue_url, parent_payload, auth, headers)
+    if not ok:
+        return False, parent_key, []
+
+    # ── STEP 2: Create subtasks as child issues ───────────
+    subtask_keys = []
+    subtasks = story.get("subtasks", [])
+    for i, st_item in enumerate(subtasks, 1):
+        st_title = st_item.get("title", "Subtask {}".format(i))
+        st_hours = st_item.get("hours", 0)
+        st_summary = "{}.{} - {} (~{}h)".format(
+            story.get("id", "US"), i, st_title, st_hours
+        ).encode("ascii", "ignore").decode("ascii")
+
+        st_description = {
+            "type": "doc", "version": 1,
+            "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text":
+                    "Subtask of: {} | Estimated: {}h | Parent: {}".format(
+                        parent_key, st_hours, summary)
+                }]}
+            ]
+        }
+
+        # Try Subtask issuetype first, fall back to Task
+        st_payload = {
+            "fields": {
+                "project": {"key": jira_project_key},
+                "summary": st_summary,
+                "description": st_description,
+                "issuetype": {"name": "Subtask"},
+                "priority": {"name": priority},
+                "parent": {"key": parent_key},   # link to parent
+            }
+        }
+        st_ok, st_key = _jira_post(issue_url, st_payload, auth, headers)
+        if not st_ok:
+            # Subtask issuetype not available — try "Task" with parent link
+            st_payload["fields"]["issuetype"] = {"name": "Task"}
+            st_ok, st_key = _jira_post(issue_url, st_payload, auth, headers)
+        if st_ok:
+            subtask_keys.append(st_key)
+
+    return True, parent_key, subtask_keys
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1159,35 +1261,90 @@ with tab2:
             jira_token = j_col1.text_input("Jira API Token", type="password", key="jira_token")
             jira_proj  = j_col2.text_input("Project Key", placeholder="PROJ", key="jira_proj")
 
-            if st.button("🚀 Push All Stories to Jira", key="push_jira", use_container_width=True):
+            tc1, tc2 = st.columns([1, 3])
+            if tc1.button("🔌 Test Connection", key="test_jira"):
+                if not all([jira_url, jira_email, jira_token, jira_proj]):
+                    st.error("❌ Fill all fields first.")
+                else:
+                    try:
+                        test_url = "{}/rest/api/3/project/{}".format(jira_url.rstrip("/"), jira_proj)
+                        r = requests.get(test_url, auth=(jira_email, jira_token), timeout=10)
+                        if r.status_code == 200:
+                            proj_data = r.json()
+                            st.success(f"✅ Connected! Project: **{proj_data.get('name', jira_proj)}** | Type: {proj_data.get('projectTypeKey','?')}")
+                        elif r.status_code == 401:
+                            st.error("❌ 401 Unauthorized — check your email and API token.")
+                        elif r.status_code == 404:
+                            st.error(f"❌ 404 Project '{jira_proj}' not found — check your Project Key.")
+                        else:
+                            st.error(f"❌ HTTP {r.status_code}: {r.text[:200]}")
+                    except Exception as e:
+                        st.error(f"❌ Connection error: {e}")
+
+            if st.button("🚀 Push All Stories + Subtasks to Jira", key="push_jira", use_container_width=True):
                 if not all([jira_url, jira_email, jira_token, jira_proj]):
                     st.error("❌ Please fill all Jira connection fields.")
                 else:
                     current_stories = st.session_state.jira_result["data"].get("stories", [])
                     current_epic = st.session_state.jira_result["data"].get("epic", {})
+                    total_subtasks = sum(len(s.get("subtasks", [])) for s in current_stories)
+                    st.info(f"📤 Pushing {len(current_stories)} stories + {total_subtasks} subtasks to Jira project **{jira_proj}**...")
+
                     success_count, fail_count = 0, 0
+                    total_subtask_created = 0
                     progress = st.progress(0)
                     results_log = []
 
                     for idx, story in enumerate(current_stories):
-                        ok, ref = push_story_to_jira(
+                        ok, parent_key, subtask_keys = push_story_to_jira(
                             story, current_epic.get("title", ""),
                             jira_url, jira_email, jira_token, jira_proj
                         )
+                        subtask_count = len(subtask_keys)
+                        total_subtask_created += subtask_count
+
                         if ok:
                             success_count += 1
-                            results_log.append({"Story": story.get("id","?"), "Title": story.get("title","")[:40], "Jira Key": ref, "Status": "✅ Created"})
+                            subtask_display = ", ".join(subtask_keys) if subtask_keys else "none"
+                            results_log.append({
+                                "Story ID": story.get("id", "?"),
+                                "Title": story.get("title", "")[:35],
+                                "Jira Key": parent_key,
+                                "Subtasks Created": subtask_count,
+                                "Subtask Keys": subtask_display[:40],
+                                "AC Count": len(story.get("acceptance_criteria", [])),
+                                "Status": "✅ Created",
+                            })
                         else:
                             fail_count += 1
-                            results_log.append({"Story": story.get("id","?"), "Title": story.get("title","")[:40], "Jira Key": "—", "Status": f"❌ {ref[:50]}"})
+                            results_log.append({
+                                "Story ID": story.get("id", "?"),
+                                "Title": story.get("title", "")[:35],
+                                "Jira Key": "-",
+                                "Subtasks Created": 0,
+                                "Subtask Keys": "-",
+                                "AC Count": 0,
+                                "Status": f"❌ {parent_key[:60]}",
+                            })
                         progress.progress((idx + 1) / len(current_stories))
 
+                    # Summary
                     if success_count > 0:
-                        st.success(f"✅ {success_count} stories pushed to Jira successfully!")
+                        st.success(f"✅ {success_count} stories + {total_subtask_created} subtasks pushed to Jira!")
+                        st.markdown(f"""
+                        <div style='background:#E8F5E9;border:1px solid #A5D6A7;border-radius:8px;padding:12px 16px;margin:8px 0;font-size:13px;'>
+                        🎯 <b>What was created in Jira project <code>{jira_proj}</code>:</b><br>
+                        &nbsp;&nbsp;• <b>{success_count}</b> parent issues (stories/tasks) — each with full User Story + Acceptance Criteria in description<br>
+                        &nbsp;&nbsp;• <b>{total_subtask_created}</b> child subtask issues — linked to their parent, with hour estimates<br>
+                        &nbsp;&nbsp;• View on your board: <a href="{jira_url}/jira/software/projects/{jira_proj}/boards" target="_blank">{jira_url}/jira/software/projects/{jira_proj}/boards</a>
+                        </div>""", unsafe_allow_html=True)
                     if fail_count > 0:
-                        st.warning(f"⚠️ {fail_count} stories failed. Check Jira URL, token, and project key.")
+                        st.warning(f"⚠️ {fail_count} stories failed. See error details in the table below.")
+
                     st.dataframe(pd.DataFrame(results_log), use_container_width=True, hide_index=True)
-                    audit_log("JIRA_EXPORT", SESSION_ID, f"User={CURRENT_USER},Project={jira_proj},Success={success_count},Fail={fail_count}", "MEDIUM")
+                    audit_log("JIRA_EXPORT", SESSION_ID,
+                              f"User={CURRENT_USER},Project={jira_proj},Stories={success_count},Subtasks={total_subtask_created},Fail={fail_count}",
+                              "MEDIUM")
 
         with export_tab2:
             current_data = st.session_state.jira_result["data"]
