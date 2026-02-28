@@ -1,34 +1,44 @@
 """
-ai_router.py  ·  LiteLLM Multi-Provider Router  ·  v2.2
+ai_router.py  ·  LiteLLM Multi-Provider Router  ·  v2.3
 =========================================================
-ROOT CAUSE FIX in v2.2:
+FIXES in v2.3:
   ─────────────────────────────────────────────────────
-  PROBLEM (v2.1 and earlier):
-    app.py synced st.secrets → os.environ with try/except pass.
-    On Streamlit Cloud, st.secrets may not be initialised when
-    the module first loads → exception silently swallowed →
-    os.environ["GEMINI_API_KEY"] never set → "No Key" shown.
+  BUG (v2.2 and earlier):
+    Gemini 2.0 Flash had quality=4, same as Groq Llama-3.3-70b.
+    Both had cost_per_1k=0.0.
+    Sort key: (-quality, cost_per_1k) → PERFECT TIE.
+    Python stable sort preserves list order, which should favour
+    Gemini (listed first), BUT the filtered candidate list order
+    is non-deterministic across Python versions / environments.
+    Result: Groq sometimes won the tie and was selected as primary.
 
-  FIX (v2.2):
-    _get_key() reads st.secrets DIRECTLY as a fallback.
-    Two-layer lookup:
-      Layer 1: os.environ   (local dev + works if sync succeeded)
-      Layer 2: st.secrets   (bulletproof for Streamlit Cloud)
-    Router no longer depends on the sync block at all.
+  FIX (v2.3):
+    Gemini 2.0 Flash  → quality = 5  (was 4)
+    Gemini 1.5 Flash  → quality = 5  (was 4)
+    This gives Gemini a strict sort advantage over all Groq models
+    (quality=4) regardless of cost, list order, or env differences.
+    Gemini will ALWAYS be selected when its key is present and valid.
+  ─────────────────────────────────────────────────────
+
+ROOT CAUSE FIX from v2.2 (retained):
+  _get_key() reads st.secrets DIRECTLY as a fallback.
+  Two-layer lookup:
+    Layer 1: os.environ   (local dev + works if sync succeeded)
+    Layer 2: st.secrets   (bulletproof for Streamlit Cloud)
   ─────────────────────────────────────────────────────
 
 PROVIDER PRIORITY (auto-detected from available keys):
-  Tier 1 — Gemini 2.0 Flash    (FREE · 1M TPM)   ← PRIMARY
-  Tier 2 — Gemini 1.5 Flash    (FREE · 1M TPM)   ← BACKUP
-  Tier 3 — Groq Llama-3.3-70b  (FREE · 6k TPM)
-  Tier 4 — Groq DeepSeek-R1    (FREE · 6k TPM)
-  Tier 5 — Groq Llama3-70b     (FREE · 6k TPM)
-  Tier 6 — Groq Gemma2-9b      (FREE · 15k TPM)
-  Tier 7 — Mistral Small       (FREE tier)
-  Tier 8 — GPT-4o-mini         (PAID)
-  Tier 9 — GPT-4o              (PAID)
-  Tier 10 — Claude Sonnet      (PAID · best ETL)
-  Tier 11 — Ollama local       (FREE · offline)
+  Tier 1 — Gemini 2.0 Flash    (FREE · 1M TPM · quality=5) ← PRIMARY
+  Tier 2 — Gemini 1.5 Flash    (FREE · 1M TPM · quality=5) ← BACKUP
+  Tier 3 — Groq Llama-3.3-70b  (FREE · 6k TPM · quality=4)
+  Tier 4 — Groq DeepSeek-R1    (FREE · 6k TPM · quality=4)
+  Tier 5 — Groq Llama3-70b     (FREE · 6k TPM · quality=3)
+  Tier 6 — Groq Gemma2-9b      (FREE · 15k TPM · quality=3)
+  Tier 7 — Mistral Small       (FREE tier · quality=3)
+  Tier 8 — GPT-4o-mini         (PAID · quality=4)
+  Tier 9 — GPT-4o              (PAID · quality=5)
+  Tier 10 — Claude Sonnet      (PAID · quality=5 · best ETL)
+  Tier 11 — Ollama local       (FREE · offline · quality=3)
 """
 
 from __future__ import annotations
@@ -89,18 +99,21 @@ class ModelConfig:
 ALL_MODELS: list[ModelConfig] = [
 
     # ── FREE — Gemini PRIMARY (1M TPM) ──────────────────────
+    # ✅ v2.3 FIX: quality bumped to 5 (was 4) to guarantee sort priority over Groq (quality=4)
     ModelConfig(
         model="gemini/gemini-2.0-flash",
         env_key="GEMINI_API_KEY",
         tpm=1_000_000, rpd=1500,
-        quality=4, cost_per_1k=0.0,
+        quality=5,           # ← FIXED: was 4, now 5 → always beats Groq in sort
+        cost_per_1k=0.0,
         provider="Google Gemini 2.0 Flash",
     ),
     ModelConfig(
         model="gemini/gemini-1.5-flash",
         env_key="GEMINI_API_KEY",
         tpm=1_000_000, rpd=1500,
-        quality=4, cost_per_1k=0.0,
+        quality=5,           # ← FIXED: was 4, now 5 → always beats Groq in sort
+        cost_per_1k=0.0,
         provider="Google Gemini 1.5 Flash",
     ),
 
@@ -296,6 +309,7 @@ def call_ai(
         return RATE_LIMIT_SENTINEL
 
     # Sort: highest quality first → lowest cost first (stable = preserves list order for ties)
+    # v2.3: Gemini quality=5 > Groq quality=4, so Gemini always wins when key is present
     candidates.sort(key=lambda c: (-c.quality, c.cost_per_1k))
 
     logger.info(f"[ROUTER] Priority order: {[c.provider for c in candidates]}")
