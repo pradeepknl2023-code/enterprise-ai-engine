@@ -296,7 +296,6 @@ def reset_cooldowns() -> int:
     AND clears auth_failed flags. UI Reset button now fully recovers
     the Gemini tier, not just cooldown timers.
     """
-    global _gemini_skip_set
     cleared = 0
 
     for model, s in _status_registry.items():
@@ -321,10 +320,12 @@ def reset_cooldowns() -> int:
         if changed:
             cleared += 1
 
-    # FIX 9: Clear the Gemini skip set so all model strings are retried
-    _gemini_skip_set = set()
+    # Clear the Gemini skip set so all model strings are retried
+    # Use .clear() not reassignment — reassignment creates a local var
+    # and leaves the module-level set untouched
+    _gemini_skip_set.clear()
 
-    # FIX 9: Clear cached working model so it re-probes with clean state
+    # Clear cached working model so it re-resolves with clean state
     _ss_set("_gemini_working_model", None)
 
     logger.info(f"[ROUTER] Full reset — {cleared} provider(s) recovered")
@@ -418,19 +419,35 @@ def _get_gemini_model() -> str | None:
     """
     Returns the best available Gemini model string.
     Checks session_state cache first. Falls back to priority list.
+    Skips strings that are in _gemini_skip_set (model not supported)
+    OR whose corresponding ALL_MODELS config is currently rate-limited.
     Never fires a probe API call.
     """
+    # Build a set of model strings that are currently rate-limited
+    now = time.time()
+    rate_limited_strings: set[str] = set()
+    for cfg in ALL_MODELS:
+        if "gemini" in cfg.model and now < _st(cfg.model).rate_limited_until:
+            # Add both the config model string and any matching priority strings
+            rate_limited_strings.add(cfg.model)
+
     # Check session_state cache (FIX 1 — survives Streamlit reruns)
     cached = _ss_get("_gemini_working_model")
-    if cached and cached not in _gemini_skip_set:
+    if (cached
+            and cached not in _gemini_skip_set
+            and cached not in rate_limited_strings):
         return cached
 
-    # Walk priority list, skip known-failed strings
+    # Walk priority list — skip unsupported AND rate-limited strings
     for candidate in GEMINI_MODEL_PRIORITY:
-        if candidate not in _gemini_skip_set:
-            return candidate
+        if candidate in _gemini_skip_set:
+            continue
+        # Check if this candidate's config is rate-limited
+        if candidate in rate_limited_strings:
+            continue
+        return candidate
 
-    # All strings failed this session
+    # All strings are either skipped or rate-limited
     return None
 
 
@@ -439,8 +456,8 @@ def _handle_gemini_model_failure(failed_model: str):
     FIX 3 + FIX 4: Soft-fail — mark string as skip, try next.
     Does NOT set model_gone=True on the config (which would blacklist
     all Gemini permanently). Just skips this string and moves on.
+    Uses .add() on the module-level set — no reassignment needed.
     """
-    global _gemini_skip_set
     _gemini_skip_set.add(failed_model)
     logger.warning(f"[ROUTER] Gemini model string failed: {failed_model} — trying next")
 
