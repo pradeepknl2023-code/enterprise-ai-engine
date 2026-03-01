@@ -67,8 +67,8 @@ FIXES in v2.5 (complete audit — 12 issues resolved):
             filter by task="code" hardcoded — uses provided task param.
 
 PROVIDER PRIORITY (unchanged from v2.4):
-  Tier 1 — Gemini 1.5 Flash    (FREE · 1M TPM · quality=5) ← PRIMARY
-  Tier 2 — Gemini 2.0 Flash    (FREE · 1M TPM · quality=5) ← if supported
+  Tier 1 — Gemini 2.0 Flash    (FREE · 1M TPM · quality=5) ← PRIMARY
+  Tier 2 — Gemini 1.5 Flash    (FREE · 1M TPM · quality=5) ← fallback
   Tier 3 — Groq Llama-3.3-70b  (FREE · 6k  TPM · quality=4)
   Tier 4 — Groq DeepSeek-R1    (FREE · 6k  TPM · quality=4)
   Tier 5 — Groq Llama3-70b     (FREE · 6k  TPM · quality=3)
@@ -141,21 +141,21 @@ class ModelConfig:
 
 ALL_MODELS: list[ModelConfig] = [
 
-    # FREE - Gemini 1.5 Flash FIRST (confirmed working on all LiteLLM versions)
-    ModelConfig(
-        model="gemini/gemini-1.5-flash",
-        env_key="GEMINI_API_KEY",
-        tpm=1_000_000, rpd=1500,
-        quality=5, cost_per_1k=0.0,
-        provider="Google Gemini 1.5 Flash",
-    ),
-    # FREE - Gemini 2.0 Flash SECOND (bonus if LiteLLM version supports it)
+    # FREE - Gemini 2.0 Flash FIRST (confirmed working on this deployment)
     ModelConfig(
         model="gemini/gemini-2.0-flash",
         env_key="GEMINI_API_KEY",
         tpm=1_000_000, rpd=1500,
         quality=5, cost_per_1k=0.0,
         provider="Google Gemini 2.0 Flash",
+    ),
+    # FREE - Gemini 1.5 Flash SECOND (fallback if 2.0 unavailable)
+    ModelConfig(
+        model="gemini/gemini-1.5-flash",
+        env_key="GEMINI_API_KEY",
+        tpm=1_000_000, rpd=1500,
+        quality=5, cost_per_1k=0.0,
+        provider="Google Gemini 1.5 Flash",
     ),
 
     # FREE - Groq — all support jira task now (FIX 7)
@@ -240,11 +240,11 @@ TASK_TOKENS = {"code": 1200, "summary": 350, "jira": 4000}
 # Tried in order on first call; working model cached in st.session_state.
 # Failed strings tracked in _gemini_skip_set (not removed from list).
 GEMINI_MODEL_PRIORITY = [
-    "gemini/gemini-1.5-flash",        # Most compatible — try first
-    "gemini/gemini-1.5-flash-latest",
-    "gemini/gemini-2.0-flash",
-    "gemini/gemini-2.0-flash-exp",
+    "gemini/gemini-2.0-flash",        # Confirmed working on this deployment
     "gemini/gemini-2.0-flash-001",
+    "gemini/gemini-2.0-flash-exp",
+    "gemini/gemini-1.5-flash",
+    "gemini/gemini-1.5-flash-latest",
 ]
 _gemini_skip_set: set[str] = set()   # strings that failed this session
 
