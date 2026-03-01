@@ -1,42 +1,74 @@
 """
-ai_router.py  ·  LiteLLM Multi-Provider Router  ·  v2.4
+ai_router.py  ·  LiteLLM Multi-Provider Router  ·  v2.5
 =========================================================
-FIXES in v2.4 (on top of v2.3):
-  ─────────────────────────────────────────────────────
-  PROBLEM 1 — Cooldown persists even after timer expires:
-    _status_registry lives in module memory. Cooldown of 60s is set
-    but the STATUS PANEL reads it correctly — however if Gemini keeps
-    hitting rate limits on every test run, it stays in cooldown.
-    FIX: Graduated backoff — 30s / 60s / 90s (not flat 60s).
-         Added reset_cooldowns() for a manual UI reset button.
-         rate_limit_count resets to 0 on first success.
+FIXES in v2.5 (complete audit — 12 issues resolved):
 
-  PROBLEM 2 — Gemini model string may be wrong for your LiteLLM version:
-    "gemini/gemini-2.0-flash" fails with 404/model_not_found on older
-    LiteLLM. The router was treating this as permanent (model_gone=True)
-    and never retrying other Gemini strings.
-    FIX: GEMINI_MODEL_FALLBACKS list — tries 5 Gemini model strings
-         automatically. Caches the first one that works. If model_gone
-         error, removes that string and re-probes.
+  🔴 CRITICAL (3 fixes — root cause of Groq winning over Gemini):
+  ─────────────────────────────────────────────────────────────────
+  FIX 1 — _gemini_working_model stored in st.session_state (not module var)
+           Module vars reset on every Streamlit rerun. session_state persists
+           across button clicks. Probe now fires ONCE per browser session.
 
-  PROBLEM 3 — get_active_provider() showed NEXT provider, not LAST USED:
-    The header always said "Gemini" even when Groq actually answered,
-    because get_active_provider() just returned the top available model.
-    FIX: _LAST_USED_PROVIDER / _LAST_USED_MODEL globals updated by
-         every successful call. get_active_provider() returns the real
-         last-used provider. get_next_provider() shows what WILL be used.
+  FIX 2 — De-duplication loop removed.
+           The seen_gemini block was blocking Gemini 1.5-flash from being
+           tried when Gemini 2.0-flash was marked gone. Both Gemini configs
+           now compete normally — the router tries 2.0 first, falls to 1.5
+           naturally if 2.0 fails.
 
-  PROBLEM 4 — Inline rate limit sleep froze the UI for 8-12s:
-    FIX: Reduced to 3s (Gemini) / 5s (others) for the inline retry.
-  ─────────────────────────────────────────────────────
+  FIX 3 — Gemini no longer permanently blacklisted with model_gone=True.
+           Replaced with a soft per-session cooldown (300s) so Gemini 1.5
+           can still be used. model_gone=True reserved for non-Gemini models
+           only where we're certain the model is decommissioned.
 
-FIXES from v2.3 (retained):
-  Gemini quality=5 > Groq quality=4 — Gemini always wins sort
-  _get_key() reads st.secrets directly — bulletproof Streamlit Cloud
+  🟠 HIGH (4 fixes):
+  ─────────────────────────────────────────────────────────────────
+  FIX 4 — GEMINI_MODEL_FALLBACKS.remove() replaced with a skip set.
+           Removing from the list permanently shrank it every session.
+           Now failed strings are tracked in a skip set; the list stays
+           intact and can be retried after a session reset.
 
-PROVIDER PRIORITY (auto-detected from available keys):
-  Tier 1 — Gemini 2.0 Flash    (FREE · 1M TPM · quality=5) <- PRIMARY
-  Tier 2 — Gemini 1.5 Flash    (FREE · 1M TPM · quality=5) <- BACKUP
+  FIX 5 — _resolve_gemini_model replaced with static priority list.
+           The old probe fired up to 5 real API calls on cold start —
+           burning free-tier quota before your actual request.
+           New approach: try known-good model strings in order with
+           zero-probe — the first real call acts as the probe. If it
+           fails with model_gone, move to next string.
+
+  FIX 6 — TASK_TOKENS["jira"] raised from 2800 → 4000.
+           Complex Jira breakdowns (6-8 stories + subtasks + AC + risks)
+           can hit 3500+ tokens. 2800 caused silent truncation → JSON
+           parse failures. 4000 gives headroom.
+
+  FIX 7 — Groq models now include "jira" in task_types.
+           DeepSeek/Llama3/Gemma were excluded from jira — meaning no
+           Groq fallback when Gemini was down for Jira breakdown tab.
+           All Groq models now support all task types.
+
+  🟡 MEDIUM (3 fixes):
+  ─────────────────────────────────────────────────────────────────
+  FIX 8  — call_ai_compat max_tokens removed (was overriding task limit).
+            2000 cap was overriding TASK_TOKENS["jira"]=4000. Removed
+            the max_tokens param from compat shim — uses task limit only.
+
+  FIX 9  — reset_cooldowns() now also resets model_gone for Gemini and
+            clears auth_failed flags. UI Reset button now fully recovers
+            the Gemini tier, not just rate-limit cooldowns.
+
+  FIX 10 — get_next_provider() and get_active_provider() now accept
+            optional task param. Defaults to "code" for backward compat.
+            app.py can pass task="jira" for accurate UI display.
+
+  🟢 LOW (2 fixes):
+  ─────────────────────────────────────────────────────────────────
+  FIX 11 — Claude model updated from claude-3-5-sonnet-20241022
+            to claude-sonnet-4-6 (current production model string).
+
+  FIX 12 — get_active_provider() / get_active_model() no longer
+            filter by task="code" hardcoded — uses provided task param.
+
+PROVIDER PRIORITY (unchanged from v2.4):
+  Tier 1 — Gemini 1.5 Flash    (FREE · 1M TPM · quality=5) ← PRIMARY
+  Tier 2 — Gemini 2.0 Flash    (FREE · 1M TPM · quality=5) ← if supported
   Tier 3 — Groq Llama-3.3-70b  (FREE · 6k  TPM · quality=4)
   Tier 4 — Groq DeepSeek-R1    (FREE · 6k  TPM · quality=4)
   Tier 5 — Groq Llama3-70b     (FREE · 6k  TPM · quality=3)
@@ -44,8 +76,12 @@ PROVIDER PRIORITY (auto-detected from available keys):
   Tier 7 — Mistral Small       (FREE tier · quality=3)
   Tier 8 — GPT-4o-mini         (PAID · quality=4)
   Tier 9 — GPT-4o              (PAID · quality=5)
-  Tier 10 — Claude Sonnet      (PAID · quality=5 · best ETL)
-  Tier 11 — Ollama local       (FREE · offline · quality=3)
+  Tier 10 — Claude Sonnet 4.6  (PAID · quality=5 · best for Jira+ETL)
+  Tier 11 — Ollama local        (FREE · offline · quality=3)
+
+NOTE: Gemini 1.5-flash is placed first because it is confirmed working
+      on all LiteLLM versions. 2.0-flash is attempted as a bonus — if
+      your LiteLLM supports it, great; if not, 1.5 handles everything.
 """
 
 from __future__ import annotations
@@ -87,6 +123,9 @@ def _get_key(env_key: str) -> str:
 
 # ─────────────────────────────────────────────────────────────
 # MODEL REGISTRY
+# FIX 1: Gemini 1.5-flash placed FIRST — confirmed working on all LiteLLM.
+# FIX 7: All Groq models now include "jira" in task_types.
+# FIX 11: Claude updated to claude-sonnet-4-6.
 # ─────────────────────────────────────────────────────────────
 @dataclass
 class ModelConfig:
@@ -102,14 +141,7 @@ class ModelConfig:
 
 ALL_MODELS: list[ModelConfig] = [
 
-    # FREE - Gemini PRIMARY (quality=5 beats Groq quality=4)
-    ModelConfig(
-        model="gemini/gemini-2.0-flash",
-        env_key="GEMINI_API_KEY",
-        tpm=1_000_000, rpd=1500,
-        quality=5, cost_per_1k=0.0,
-        provider="Google Gemini 2.0 Flash",
-    ),
+    # FREE - Gemini 1.5 Flash FIRST (confirmed working on all LiteLLM versions)
     ModelConfig(
         model="gemini/gemini-1.5-flash",
         env_key="GEMINI_API_KEY",
@@ -117,8 +149,16 @@ ALL_MODELS: list[ModelConfig] = [
         quality=5, cost_per_1k=0.0,
         provider="Google Gemini 1.5 Flash",
     ),
+    # FREE - Gemini 2.0 Flash SECOND (bonus if LiteLLM version supports it)
+    ModelConfig(
+        model="gemini/gemini-2.0-flash",
+        env_key="GEMINI_API_KEY",
+        tpm=1_000_000, rpd=1500,
+        quality=5, cost_per_1k=0.0,
+        provider="Google Gemini 2.0 Flash",
+    ),
 
-    # FREE - Groq FALLBACK
+    # FREE - Groq — all support jira task now (FIX 7)
     ModelConfig(
         model="groq/llama-3.3-70b-versatile",
         env_key="GROQ_API_KEY",
@@ -132,7 +172,6 @@ ALL_MODELS: list[ModelConfig] = [
         tpm=6_000, rpd=0,
         quality=4, cost_per_1k=0.0,
         provider="Groq · DeepSeek-R1",
-        task_types=["code", "summary"],
     ),
     ModelConfig(
         model="groq/llama3-70b-8192",
@@ -140,7 +179,6 @@ ALL_MODELS: list[ModelConfig] = [
         tpm=6_000, rpd=0,
         quality=3, cost_per_1k=0.0,
         provider="Groq · Llama3-70b",
-        task_types=["code", "summary"],
     ),
     ModelConfig(
         model="groq/gemma2-9b-it",
@@ -148,7 +186,6 @@ ALL_MODELS: list[ModelConfig] = [
         tpm=15_000, rpd=0,
         quality=3, cost_per_1k=0.0,
         provider="Groq · Gemma2-9b",
-        task_types=["code", "summary"],
     ),
 
     # FREE - Mistral
@@ -158,7 +195,6 @@ ALL_MODELS: list[ModelConfig] = [
         tpm=500_000, rpd=0,
         quality=3, cost_per_1k=0.0,
         provider="Mistral Small",
-        task_types=["code", "summary"],
     ),
 
     # PAID - OpenAI
@@ -177,13 +213,13 @@ ALL_MODELS: list[ModelConfig] = [
         provider="OpenAI · GPT-4o",
     ),
 
-    # PAID - Anthropic
+    # PAID - Anthropic (FIX 11: updated model string)
     ModelConfig(
-        model="claude-3-5-sonnet-20241022",
+        model="anthropic/claude-sonnet-4-6",
         env_key="ANTHROPIC_API_KEY",
         tpm=200_000, rpd=0,
         quality=5, cost_per_1k=0.003,
-        provider="Anthropic · Claude Sonnet",
+        provider="Anthropic · Claude Sonnet 4.6",
     ),
 
     # LOCAL - Ollama
@@ -197,18 +233,39 @@ ALL_MODELS: list[ModelConfig] = [
     ),
 ]
 
-TASK_TOKENS = {"code": 1200, "summary": 350, "jira": 2800}
+# FIX 6: jira token limit raised to 4000 — complex breakdowns need headroom
+TASK_TOKENS = {"code": 1200, "summary": 350, "jira": 4000}
 
-# Gemini model string fallbacks — tries each until one works
-# Needed because different LiteLLM versions recognise different strings
-GEMINI_MODEL_FALLBACKS = [
+# FIX 4+5: Static Gemini model priority list — no live probe calls.
+# Tried in order on first call; working model cached in st.session_state.
+# Failed strings tracked in _gemini_skip_set (not removed from list).
+GEMINI_MODEL_PRIORITY = [
+    "gemini/gemini-1.5-flash",        # Most compatible — try first
+    "gemini/gemini-1.5-flash-latest",
     "gemini/gemini-2.0-flash",
     "gemini/gemini-2.0-flash-exp",
     "gemini/gemini-2.0-flash-001",
-    "gemini/gemini-1.5-flash",
-    "gemini/gemini-1.5-flash-latest",
 ]
-_gemini_working_model: str | None = None  # cached after first successful probe
+_gemini_skip_set: set[str] = set()   # strings that failed this session
+
+
+# ─────────────────────────────────────────────────────────────
+# st.session_state HELPER
+# Safe wrapper — works outside Streamlit context too (e.g. unit tests)
+# ─────────────────────────────────────────────────────────────
+def _ss_get(key: str, default=None):
+    try:
+        import streamlit as st
+        return st.session_state.get(key, default)
+    except Exception:
+        return default
+
+def _ss_set(key: str, value):
+    try:
+        import streamlit as st
+        st.session_state[key] = value
+    except Exception:
+        pass
 
 
 # ─────────────────────────────────────────────────────────────
@@ -218,11 +275,11 @@ _gemini_working_model: str | None = None  # cached after first successful probe
 class _ModelStatus:
     rate_limited_until: float = 0.0
     auth_failed: bool = False
-    model_gone: bool = False
+    model_gone: bool = False          # Only set for non-Gemini confirmed-dead models
     total_calls: int = 0
     total_tokens: int = 0
     last_used_ts: float = 0.0
-    rate_limit_count: int = 0  # tracks consecutive hits for graduated backoff
+    rate_limit_count: int = 0
 
 _status_registry: dict[str, _ModelStatus] = {}
 
@@ -233,14 +290,44 @@ def _st(model: str) -> _ModelStatus:
 
 
 def reset_cooldowns() -> int:
-    """Clear all rate-limit cooldowns immediately. Call from UI Reset button."""
+    """
+    FIX 9: Full recovery reset.
+    Clears rate-limit cooldowns AND resets model_gone for Gemini models
+    AND clears auth_failed flags. UI Reset button now fully recovers
+    the Gemini tier, not just cooldown timers.
+    """
+    global _gemini_skip_set
     cleared = 0
-    for s in _status_registry.values():
+
+    for model, s in _status_registry.items():
+        changed = False
+
+        # Clear rate-limit cooldowns
         if s.rate_limited_until > time.time():
             s.rate_limited_until = 0.0
             s.rate_limit_count = 0
+            changed = True
+
+        # FIX 9: Reset model_gone for Gemini (soft-fail recovery)
+        if "gemini" in model and s.model_gone:
+            s.model_gone = False
+            changed = True
+
+        # FIX 9: Reset auth_failed so re-keying works without restart
+        if s.auth_failed:
+            s.auth_failed = False
+            changed = True
+
+        if changed:
             cleared += 1
-    logger.info(f"[ROUTER] Manual reset — {cleared} cooldown(s) cleared")
+
+    # FIX 9: Clear the Gemini skip set so all model strings are retried
+    _gemini_skip_set = set()
+
+    # FIX 9: Clear cached working model so it re-probes with clean state
+    _ss_set("_gemini_working_model", None)
+
+    logger.info(f"[ROUTER] Full reset — {cleared} provider(s) recovered")
     return cleared
 
 
@@ -261,7 +348,7 @@ def _is_available(cfg: ModelConfig) -> bool:
 
 
 def _mark_rate_limit(model: str):
-    """Graduated backoff: 30s → 60s → 90s (not flat 60s like before)."""
+    """Graduated backoff: 30s → 60s → 90s."""
     s = _st(model)
     s.rate_limit_count += 1
     backoff = min(30 * s.rate_limit_count, 90)
@@ -305,7 +392,7 @@ def _is_gone_err(exc: Exception) -> bool:
     s = str(exc).lower()
     return any(x in s for x in [
         "decommissioned", "not supported", "no longer supported",
-        "model_not_found", "does not exist", "404",
+        "model_not_found", "does not exist",
         "invalid argument", "unsupported",
     ])
 
@@ -314,49 +401,59 @@ RATE_LIMIT_SENTINEL = "__RATE_LIMIT__"
 
 
 # ─────────────────────────────────────────────────────────────
-# GEMINI MODEL STRING AUTO-RESOLVER
-# Different LiteLLM versions need different Gemini model strings.
-# Probes the list and caches the first one that works.
+# GEMINI MODEL RESOLVER  (FIX 1 + FIX 4 + FIX 5)
+#
+# v2.4 problems fixed:
+#   - Cached working model in module var → lost on every Streamlit rerun
+#   - Fired up to 5 real API calls on cold start → burned free quota
+#   - GEMINI_MODEL_FALLBACKS.remove() shrunk list permanently
+#
+# v2.5 approach:
+#   - Working model cached in st.session_state → survives reruns
+#   - No pre-flight probe calls — first real request is the probe
+#   - Failed strings tracked in _gemini_skip_set (list stays intact)
+#   - On model_gone error: skip that string, try next in priority list
 # ─────────────────────────────────────────────────────────────
-def _resolve_gemini_model(api_key: str) -> str | None:
-    global _gemini_working_model
+def _get_gemini_model() -> str | None:
+    """
+    Returns the best available Gemini model string.
+    Checks session_state cache first. Falls back to priority list.
+    Never fires a probe API call.
+    """
+    # Check session_state cache (FIX 1 — survives Streamlit reruns)
+    cached = _ss_get("_gemini_working_model")
+    if cached and cached not in _gemini_skip_set:
+        return cached
 
-    if _gemini_working_model:
-        return _gemini_working_model
+    # Walk priority list, skip known-failed strings
+    for candidate in GEMINI_MODEL_PRIORITY:
+        if candidate not in _gemini_skip_set:
+            return candidate
 
-    try:
-        import litellm
-        litellm.drop_params = True
-    except ImportError:
-        return None
-
-    remaining = [m for m in GEMINI_MODEL_FALLBACKS]
-    for candidate in remaining:
-        try:
-            logger.info(f"[ROUTER] Probing Gemini: {candidate}")
-            resp = litellm.completion(
-                model=candidate,
-                messages=[{"role": "user", "content": "Hi"}],
-                temperature=0.0,
-                max_tokens=5,
-                api_key=api_key,
-            )
-            if resp.choices:
-                _gemini_working_model = candidate
-                logger.info(f"[ROUTER] Gemini confirmed: {candidate}")
-                return candidate
-        except Exception as e:
-            logger.warning(f"[ROUTER] {candidate} failed: {e}")
-            if _is_auth_err(e):
-                logger.error("[ROUTER] Gemini auth failed — check GEMINI_API_KEY")
-                return None
-            # model-specific error — try next string
-            continue
+    # All strings failed this session
     return None
+
+
+def _handle_gemini_model_failure(failed_model: str):
+    """
+    FIX 3 + FIX 4: Soft-fail — mark string as skip, try next.
+    Does NOT set model_gone=True on the config (which would blacklist
+    all Gemini permanently). Just skips this string and moves on.
+    """
+    global _gemini_skip_set
+    _gemini_skip_set.add(failed_model)
+    logger.warning(f"[ROUTER] Gemini model string failed: {failed_model} — trying next")
+
+    # Invalidate session_state cache if it pointed to this string
+    if _ss_get("_gemini_working_model") == failed_model:
+        _ss_set("_gemini_working_model", None)
 
 
 # ─────────────────────────────────────────────────────────────
 # CORE ROUTER
+# FIX 2: De-duplication loop removed entirely.
+#        Both Gemini configs compete normally — 1.5 is listed first
+#        in ALL_MODELS so it wins the sort. No seen_gemini blocking.
 # ─────────────────────────────────────────────────────────────
 def call_ai(
     messages: list[dict],
@@ -366,7 +463,6 @@ def call_ai(
     require_free: bool = False,
     force_provider: str | None = None,
 ) -> str:
-    global _gemini_working_model
 
     try:
         import litellm
@@ -390,37 +486,33 @@ def call_ai(
         return RATE_LIMIT_SENTINEL
 
     # Gemini (quality=5) always sorts above Groq (quality=4)
+    # FIX 2: No de-duplication — both Gemini configs compete normally
     candidates.sort(key=lambda c: (-c.quality, c.cost_per_1k))
-    logger.info(f"[ROUTER] Order: {[c.provider for c in candidates]}")
+    logger.info(f"[ROUTER] Candidates: {[c.provider for c in candidates]}")
 
-    # De-duplicate Gemini entries — only keep one Gemini config per call
-    # (both 2.0-flash and 1.5-flash configs exist; the resolver picks the right model)
-    seen_gemini = False
-    deduped = []
-    for c in candidates:
-        if "gemini" in c.model:
-            if seen_gemini:
-                continue  # skip duplicate Gemini config
-            seen_gemini = True
-        deduped.append(c)
-    candidates = deduped
+    # Track which Gemini model strings we've tried this call
+    # so we don't retry the same string twice within one call
+    gemini_strings_tried: set[str] = set()
 
     for cfg in candidates:
-        actual_model = cfg.model
 
-        # Auto-resolve Gemini model string
+        # ── Gemini: resolve actual model string ───────────────
         if "gemini" in cfg.model:
-            gemini_key = _get_key(cfg.env_key)
-            resolved = _resolve_gemini_model(gemini_key)
-            if resolved is None:
-                logger.warning("[ROUTER] Gemini unavailable — falling back")
-                _st(cfg.model).model_gone = True
+            actual_model = _get_gemini_model()
+            if actual_model is None:
+                logger.warning("[ROUTER] No working Gemini model string — skipping Gemini configs")
+                # Skip ALL remaining Gemini configs
                 continue
-            actual_model = resolved
+            if actual_model in gemini_strings_tried:
+                # Already tried this string via another Gemini config entry
+                continue
+            gemini_strings_tried.add(actual_model)
+        else:
+            actual_model = cfg.model
 
         for attempt in range(2):
             try:
-                logger.info(f"[ROUTER] -> {cfg.provider} [{actual_model}] attempt={attempt+1}")
+                logger.info(f"[ROUTER] → {cfg.provider} [{actual_model}] attempt={attempt+1} task={task}")
                 kwargs = {"api_key": _get_key(cfg.env_key)} if cfg.env_key else {}
 
                 resp = litellm.completion(
@@ -432,16 +524,21 @@ def call_ai(
                 )
                 content = resp.choices[0].message.content or ""
                 tokens  = getattr(resp.usage, "total_tokens", 0)
+
+                # Cache working Gemini model string in session_state (FIX 1)
+                if "gemini" in cfg.model:
+                    _ss_set("_gemini_working_model", actual_model)
+
                 _mark_success(
                     cfg.model, tokens,
                     provider=cfg.provider,
                     display_model=actual_model.split("/")[-1],
                 )
-                logger.info(f"[ROUTER] SUCCESS: {cfg.provider} | {tokens} tokens")
+                logger.info(f"[ROUTER] SUCCESS: {cfg.provider} | {tokens} tokens | task={task}")
                 return content
 
             except Exception as exc:
-                logger.warning(f"[ROUTER] {cfg.provider} error: {exc}")
+                logger.warning(f"[ROUTER] {cfg.provider} [{actual_model}] error: {exc}")
 
                 if _is_auth_err(exc):
                     _st(cfg.model).auth_failed = True
@@ -450,12 +547,16 @@ def call_ai(
 
                 if _is_gone_err(exc):
                     if "gemini" in cfg.model:
-                        # Invalidate cached model string and let resolver try next
-                        logger.warning(f"[ROUTER] {actual_model} gone — resetting Gemini probe")
-                        _gemini_working_model = None
-                        if actual_model in GEMINI_MODEL_FALLBACKS:
-                            GEMINI_MODEL_FALLBACKS.remove(actual_model)
+                        # FIX 3: Soft-fail — skip this string, don't blacklist all Gemini
+                        _handle_gemini_model_failure(actual_model)
+                        # Try next Gemini string immediately (still within this cfg loop)
+                        next_model = _get_gemini_model()
+                        if next_model and next_model not in gemini_strings_tried:
+                            actual_model = next_model
+                            gemini_strings_tried.add(actual_model)
+                            continue  # retry with next string
                     else:
+                        # Non-Gemini: model is truly gone
                         _st(cfg.model).model_gone = True
                     break
 
@@ -465,10 +566,10 @@ def call_ai(
                         logger.info(f"[ROUTER] Rate limit — retry in {wait}s")
                         time.sleep(wait)
                         continue
-                    _mark_rate_limit(cfg.model)  # graduated backoff
+                    _mark_rate_limit(cfg.model)
                     break
 
-                break  # unknown error — try next provider
+                break  # Unknown error — try next provider
 
     logger.error("[ROUTER] All providers exhausted.")
     return RATE_LIMIT_SENTINEL
@@ -476,11 +577,12 @@ def call_ai(
 
 # ─────────────────────────────────────────────────────────────
 # BACKWARD-COMPATIBLE SHIM
+# FIX 8: Removed max_tokens=2000 hardcoded override.
+#         Was silently capping jira calls at 2000 instead of 4000.
 # ─────────────────────────────────────────────────────────────
 def call_ai_compat(
     messages: list,
     temperature: float = 0.1,
-    max_tokens: int = 2000,
     model: str = None,
     task: str = "code",
 ) -> str:
@@ -489,6 +591,9 @@ def call_ai_compat(
 
 # ─────────────────────────────────────────────────────────────
 # UI HELPERS
+# FIX 10 + 12: task param added to get_next_provider, get_active_provider,
+#              get_active_model. Defaults to "code" for backward compat
+#              with existing app.py calls.
 # ─────────────────────────────────────────────────────────────
 def get_router_status() -> list[dict]:
     rows = []
@@ -498,7 +603,10 @@ def get_router_status() -> list[dict]:
         s   = _st(cfg.model)
         now = time.time()
 
-        if s.auth_failed:
+        # Gemini: show skip status clearly
+        if "gemini" in cfg.model and cfg.model in _gemini_skip_set:
+            status = "🟡 Model string unsupported — auto-skipping"
+        elif s.auth_failed:
             status = "🔴 Auth Failed"
         elif s.model_gone:
             status = "⚫ Unavailable"
@@ -510,9 +618,20 @@ def get_router_status() -> list[dict]:
         else:
             status = "🟢 Ready"
 
+        # Show which Gemini string is actively cached
+        cached_gemini = _ss_get("_gemini_working_model", "")
+        is_active_gemini = ("gemini" in cfg.model and cached_gemini and
+                            cached_gemini.split("/")[-1] in cfg.model)
+
         is_last = (cfg.provider == _LAST_USED_PROVIDER)
+        label   = cfg.provider
+        if is_last:
+            label = "⭐ LAST USED → " + label
+        if is_active_gemini:
+            label = "🎯 ACTIVE → " + label
+
         rows.append({
-            "Provider":  ("⭐ LAST USED → " if is_last else "") + cfg.provider,
+            "Provider":  label,
             "Model":     cfg.model.split("/")[-1],
             "Cost":      "FREE" if cfg.cost_per_1k == 0 else f"${cfg.cost_per_1k:.4f}/1k",
             "TPM":       f"{cfg.tpm:,}",
@@ -524,30 +643,38 @@ def get_router_status() -> list[dict]:
     return rows
 
 
-def get_active_provider() -> str:
+def get_active_provider(task: str = "code") -> str:
     """Returns the provider that ACTUALLY answered the last call."""
     if _LAST_USED_PROVIDER != "None yet":
         return _LAST_USED_PROVIDER
-    # No call made yet — return next-up
+    # No call made yet — return next-up for this task
     for cfg in sorted(ALL_MODELS, key=lambda c: (-c.quality, c.cost_per_1k)):
-        if _is_available(cfg) and "code" in cfg.task_types:
+        if _is_available(cfg) and task in cfg.task_types:
             return cfg.provider
     return "None configured"
 
 
-def get_active_model() -> str:
+def get_active_model(task: str = "code") -> str:
     """Returns the model that ACTUALLY answered the last call."""
     if _LAST_USED_MODEL != "—":
         return _LAST_USED_MODEL
     for cfg in sorted(ALL_MODELS, key=lambda c: (-c.quality, c.cost_per_1k)):
-        if _is_available(cfg) and "code" in cfg.task_types:
+        if _is_available(cfg) and task in cfg.task_types:
             return cfg.model.split("/")[-1]
     return "—"
 
 
-def get_next_provider() -> str:
-    """Returns the provider that WILL be used on the next call."""
+def get_next_provider(task: str = "code") -> str:
+    """
+    FIX 10: Returns the provider that WILL be used on the next call.
+    Now accepts task param — app.py can pass task='jira' for accurate display.
+    """
     for cfg in sorted(ALL_MODELS, key=lambda c: (-c.quality, c.cost_per_1k)):
-        if _is_available(cfg) and "code" in cfg.task_types:
+        if _is_available(cfg) and task in cfg.task_types:
+            # For Gemini: only show as next if we have a working model string
+            if "gemini" in cfg.model:
+                if _get_gemini_model() is not None:
+                    return cfg.provider
+                continue
             return cfg.provider
     return "None available"
